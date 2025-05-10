@@ -7,6 +7,12 @@ import * as updateController from '../controllers/update.controller';
 const router = Router();
 const upload = multer({ dest: 'temp/' });
 
+// Public routes (no authentication required)
+router.get('/manifest/:appSlug', updateController.getManifest);
+router.get('/bundle/:appSlug/:bundleId', updateController.getBundleFile);
+router.get('/assets/:appSlug/:assetId', updateController.getAssetFile);
+router.get('/apps/:slug/public', appController.getPublicAppInfo);
+
 // Authentication middleware for all API routes
 router.use(authenticateJWT);
 
@@ -36,8 +42,5 @@ router.post(
 router.get('/apps/:appId/updates/:id', requireAppAccess, updateController.getUpdate);
 router.post('/apps/:appId/updates/:id/rollback', requireAppAccess, updateController.rollbackUpdate);
 router.post('/apps/:appId/updates/:id/promote', requireAppAccess, updateController.promoteUpdate);
-
-// Public routes (no authentication required)
-router.get('/manifest/:appSlug', updateController.getManifest);
 
 export default router;

@@ -245,3 +245,27 @@ export const removeUserFromApp = async (req: Request, res: Response): Promise<vo
     res.status(500).json({ message: 'Error removing user from app' });
   }
 };
+
+export const getPublicAppInfo = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const slug = req.params.slug;
+
+    // Check if app exists
+    const app = await AppRepository.findBySlug(slug);
+    if (!app) {
+      res.status(404).json({ message: 'App not found' });
+      return;
+    }
+
+    // Return minimal public information
+    res.json({
+      id: app.id,
+      name: app.name,
+      slug: app.slug,
+      description: app.description
+    });
+  } catch (error) {
+    console.error('Error fetching public app info:', error);
+    res.status(500).json({ message: 'Error fetching public app info' });
+  }
+};

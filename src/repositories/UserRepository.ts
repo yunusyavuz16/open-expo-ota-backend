@@ -48,7 +48,16 @@ export class UserRepository {
       .eq('github_id', githubId)
       .single();
 
-    if (error || !data) {
+    if (error) {
+      // Check if it's a 'not found' error, which we expect sometimes
+      if (error.code === 'PGRST116') {
+        return null;
+      }
+      console.error('Error fetching user by GitHub ID:', error);
+      return null;
+    }
+
+    if (!data) {
       return null;
     }
 
@@ -59,11 +68,9 @@ export class UserRepository {
    * Create a new user
    */
   async create(user: UserInput): Promise<User> {
-    const now = new Date().toISOString();
-
-    const { data, error } = await supabase
-      .from('users')
-      .insert({
+    try {
+      const now = new Date().toISOString();
+      const userData = {
         github_id: user.githubId,
         username: user.username,
         email: user.email,
@@ -71,36 +78,59 @@ export class UserRepository {
         access_token: user.accessToken,
         created_at: now,
         updated_at: now
-      })
-      .select()
-      .single();
+      };
 
-    if (error || !data) {
-      throw new Error(`Error creating user: ${error?.message}`);
+      console.log('Creating user with data:', JSON.stringify(userData, null, 2));
+
+      const { data, error } = await supabase
+        .from('users')
+        .insert(userData)
+        .select()
+        .single();
+
+      if (error) {
+        console.error('Supabase insert error:', error);
+        throw new Error(`Error creating user: ${error.message}`);
+      }
+
+      if (!data) {
+        throw new Error('User created but no data returned');
+      }
+
+      return this.mapToUser(data);
+    } catch (error) {
+      console.error('Error in create method:', error);
+      throw error;
     }
-
-    return this.mapToUser(data);
   }
 
   /**
    * Update a user
    */
   async update(id: number, user: Partial<UserInput>): Promise<User> {
+    const updateData: any = {
+      updated_at: new Date().toISOString()
+    };
+
+    if (user.username !== undefined) updateData.username = user.username;
+    if (user.email !== undefined) updateData.email = user.email;
+    if (user.role !== undefined) updateData.role = user.role;
+    if (user.accessToken !== undefined) updateData.access_token = user.accessToken;
+
     const { data, error } = await supabase
       .from('users')
-      .update({
-        username: user.username,
-        email: user.email,
-        role: user.role,
-        access_token: user.accessToken,
-        updated_at: new Date().toISOString()
-      })
+      .update(updateData)
       .eq('id', id)
       .select()
       .single();
 
-    if (error || !data) {
-      throw new Error(`Error updating user: ${error?.message}`);
+    if (error) {
+      console.error('Error updating user:', error);
+      throw new Error(`Error updating user: ${error.message}`);
+    }
+
+    if (!data) {
+      throw new Error('User updated but no data returned');
     }
 
     return this.mapToUser(data);

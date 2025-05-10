@@ -1,20 +1,24 @@
 export enum UserRole {
   ADMIN = 'admin',
-  DEVELOPER = 'developer'
+  DEVELOPER = 'developer',
+  VIEWER = 'viewer',
 }
 
 export enum ReleaseChannel {
   PRODUCTION = 'production',
   STAGING = 'staging',
-  DEVELOPMENT = 'development'
+  DEVELOPMENT = 'development',
 }
 
 export enum Platform {
   IOS = 'ios',
   ANDROID = 'android',
-  WEB = 'web'
+  WEB = 'web',
 }
 
+export type StorageType = 'local' | 's3';
+
+// Define the User type with all required properties
 export interface User {
   id: number;
   githubId: number;
@@ -22,8 +26,8 @@ export interface User {
   email: string;
   role: UserRole;
   accessToken: string;
-  createdAt: Date;
-  updatedAt: Date;
+  createdAt?: Date;
+  updatedAt?: Date;
 }
 
 export interface App {

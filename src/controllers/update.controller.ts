@@ -3,9 +3,30 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { Update, Bundle, Manifest, Asset, App } from '../models';
-import { ReleaseChannel, Platform } from '../types';
+import { ReleaseChannel, Platform, User } from '../types';
 import { storeFile, generateStorageKey } from '../utils/storage';
 import { generateManifest, isCompatibleRuntimeVersion } from '../utils/manifest';
+
+// Define the expected structure of req.files from multer
+interface MulterFile {
+  fieldname: string;
+  originalname: string;
+  encoding: string;
+  mimetype: string;
+  size: number;
+  destination: string;
+  filename: string;
+  path: string;
+  buffer?: Buffer;
+}
+
+interface FileRequest extends Request {
+  files: {
+    bundle?: MulterFile[];
+    assets?: MulterFile[];
+  };
+  user: User;
+}
 
 // Helper function to calculate hash of a file buffer
 const calculateHash = (buffer: Buffer): string => {
@@ -14,6 +35,7 @@ const calculateHash = (buffer: Buffer): string => {
 
 export const createUpdate = async (req: Request, res: Response): Promise<void> => {
   try {
+    const { files, user } = req as FileRequest;
     const appId = parseInt(req.params.appId, 10);
     const {
       version,
@@ -36,12 +58,12 @@ export const createUpdate = async (req: Request, res: Response): Promise<void> =
     }
 
     // Check for bundle file
-    if (!req.files || !req.files.bundle || Array.isArray(req.files.bundle)) {
+    if (!files || !files.bundle || files.bundle.length === 0) {
       res.status(400).json({ message: 'Bundle file is required' });
       return;
     }
 
-    const bundleFile = req.files.bundle;
+    const bundleFile = files.bundle[0];
     const bundleBuffer = fs.readFileSync(bundleFile.path);
     const bundleHash = calculateHash(bundleBuffer);
 
@@ -70,8 +92,8 @@ export const createUpdate = async (req: Request, res: Response): Promise<void> =
 
     // Process assets
     const assets: Asset[] = [];
-    if (req.files && req.files.assets && Array.isArray(req.files.assets)) {
-      for (const assetFile of req.files.assets) {
+    if (files && files.assets && files.assets.length > 0) {
+      for (const assetFile of files.assets) {
         const assetBuffer = fs.readFileSync(assetFile.path);
         const assetHash = calculateHash(assetBuffer);
 
@@ -133,7 +155,7 @@ export const createUpdate = async (req: Request, res: Response): Promise<void> =
       isRollback: false,
       bundleId,
       manifestId: manifest.id,
-      publishedBy: req.user.id,
+      publishedBy: user.id,
     });
 
     // Update the updateId in manifest and assets
@@ -256,22 +278,18 @@ export const getManifest = async (req: Request, res: Response): Promise<void> =>
       return;
     }
 
-    // Get the latest update
+    // Get the latest update with its manifest
     const latestUpdate = updates[0];
+    const updateManifest = latestUpdate.manifest;
 
     // Check if platform is supported
-    if (latestUpdate.manifest &&
-        !latestUpdate.manifest.platforms.includes(platform as Platform)) {
+    if (!updateManifest || !updateManifest.platforms.includes(platform as Platform)) {
       res.status(404).json({ message: 'Platform not supported by this update' });
       return;
     }
 
     // Return manifest content
-    if (latestUpdate.manifest) {
-      res.json(latestUpdate.manifest.content);
-    } else {
-      res.status(404).json({ message: 'Manifest not found' });
-    }
+    res.json(updateManifest.content);
   } catch (error) {
     console.error('Error fetching manifest:', error);
     res.status(500).json({ message: 'Error fetching manifest' });
@@ -280,6 +298,7 @@ export const getManifest = async (req: Request, res: Response): Promise<void> =>
 
 export const promoteUpdate = async (req: Request, res: Response): Promise<void> => {
   try {
+    const { user } = req as FileRequest;
     const appId = parseInt(req.params.appId, 10);
     const updateId = parseInt(req.params.id, 10);
     const { channel } = req.body;
@@ -300,7 +319,7 @@ export const promoteUpdate = async (req: Request, res: Response): Promise<void> 
       return;
     }
 
-    // Get update
+    // Get update with manifest
     const update = await Update.findOne({
       where: { id: updateId, appId },
       include: [
@@ -323,23 +342,24 @@ export const promoteUpdate = async (req: Request, res: Response): Promise<void> 
       isRollback: false,
       bundleId: update.bundleId,
       manifestId: update.manifestId,
-      publishedBy: req.user.id,
+      publishedBy: user.id,
     });
 
     // Update the manifest with the new channel
-    if (update.manifest) {
+    const updateManifest = update.manifest;
+    if (updateManifest) {
       const manifestContent = {
-        ...update.manifest.content,
+        ...updateManifest.content,
         channel: channel
       };
 
       const newManifest = await Manifest.create({
         appId,
         updateId: promotedUpdate.id,
-        version: update.manifest.version,
+        version: updateManifest.version,
         channel: channel as ReleaseChannel,
-        runtimeVersion: update.manifest.runtimeVersion,
-        platforms: update.manifest.platforms,
+        runtimeVersion: updateManifest.runtimeVersion,
+        platforms: updateManifest.platforms,
         content: manifestContent,
       });
 
@@ -372,6 +392,7 @@ export const promoteUpdate = async (req: Request, res: Response): Promise<void> 
 
 export const rollbackUpdate = async (req: Request, res: Response): Promise<void> => {
   try {
+    const { user } = req as FileRequest;
     const appId = parseInt(req.params.appId, 10);
     const updateId = parseInt(req.params.id, 10);
 
@@ -401,7 +422,7 @@ export const rollbackUpdate = async (req: Request, res: Response): Promise<void>
       isRollback: true,
       bundleId: updateToRollback.bundleId,
       manifestId: updateToRollback.manifestId,
-      publishedBy: req.user.id,
+      publishedBy: user.id,
     });
 
     res.json(rollbackUpdate);
@@ -410,3 +431,146 @@ export const rollbackUpdate = async (req: Request, res: Response): Promise<void>
     res.status(500).json({ message: 'Error rolling back update' });
   }
 };
+
+export const getBundleFile = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const appSlug = req.params.appSlug;
+    const bundleId = parseInt(req.params.bundleId, 10);
+
+    // Get app by slug
+    const app = await App.findOne({ where: { slug: appSlug } });
+    if (!app) {
+      res.status(404).json({ message: 'App not found' });
+      return;
+    }
+
+    // Get bundle
+    const bundle = await Bundle.findOne({
+      where: { id: bundleId, appId: app.id },
+    });
+
+    if (!bundle) {
+      res.status(404).json({ message: 'Bundle not found' });
+      return;
+    }
+
+    // Determine file path based on storage type
+    let filePath: string;
+    if (bundle.storageType === 'local') {
+      filePath = path.join(process.env.LOCAL_STORAGE_PATH || './storage', bundle.storagePath);
+    } else {
+      // For S3 or other storage types, implement the retrieval logic
+      res.status(501).json({ message: 'S3 storage not implemented yet' });
+      return;
+    }
+
+    // Check if file exists
+    if (!fs.existsSync(filePath)) {
+      res.status(404).json({ message: 'Bundle file not found' });
+      return;
+    }
+
+    // Set headers
+    res.setHeader('Content-Type', 'application/javascript');
+    res.setHeader('Content-Disposition', `attachment; filename=bundle.js`);
+
+    // Stream the file
+    fs.createReadStream(filePath).pipe(res);
+  } catch (error) {
+    console.error('Error serving bundle file:', error);
+    res.status(500).json({ message: 'Error serving bundle file' });
+  }
+};
+
+export const getAssetFile = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const appSlug = req.params.appSlug;
+    const assetId = parseInt(req.params.assetId, 10);
+
+    // Get app by slug
+    const app = await App.findOne({ where: { slug: appSlug } });
+    if (!app) {
+      res.status(404).json({ message: 'App not found' });
+      return;
+    }
+
+    // Get asset
+    const asset = await Asset.findOne({
+      where: { id: assetId },
+      include: [
+        {
+          model: Update,
+          as: 'update',
+          where: { appId: app.id },
+          required: true
+        }
+      ]
+    });
+
+    if (!asset) {
+      res.status(404).json({ message: 'Asset not found' });
+      return;
+    }
+
+    // Determine file path based on storage type
+    let filePath: string;
+    if (asset.storageType === 'local') {
+      filePath = path.join(process.env.LOCAL_STORAGE_PATH || './storage', asset.storagePath);
+    } else {
+      // For S3 or other storage types, implement the retrieval logic
+      res.status(501).json({ message: 'S3 storage not implemented yet' });
+      return;
+    }
+
+    // Check if file exists
+    if (!fs.existsSync(filePath)) {
+      res.status(404).json({ message: 'Asset file not found' });
+      return;
+    }
+
+    // Set appropriate content type based on file extension
+    const contentType = getContentTypeFromFileName(asset.name);
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Content-Disposition', `attachment; filename=${asset.name}`);
+
+    // Stream the file
+    fs.createReadStream(filePath).pipe(res);
+  } catch (error) {
+    console.error('Error serving asset file:', error);
+    res.status(500).json({ message: 'Error serving asset file' });
+  }
+};
+
+// Helper function to determine content type from file name
+function getContentTypeFromFileName(fileName: string): string {
+  const extension = path.extname(fileName).toLowerCase();
+  switch (extension) {
+    case '.js':
+      return 'application/javascript';
+    case '.json':
+      return 'application/json';
+    case '.png':
+      return 'image/png';
+    case '.jpg':
+    case '.jpeg':
+      return 'image/jpeg';
+    case '.gif':
+      return 'image/gif';
+    case '.svg':
+      return 'image/svg+xml';
+    case '.ttf':
+      return 'font/ttf';
+    case '.otf':
+      return 'font/otf';
+    case '.woff':
+      return 'font/woff';
+    case '.woff2':
+      return 'font/woff2';
+    case '.css':
+      return 'text/css';
+    case '.html':
+      return 'text/html';
+    default:
+      return 'application/octet-stream';
+  }
+}
