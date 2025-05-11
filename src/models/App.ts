@@ -1,28 +1,7 @@
 import { Model, DataTypes, Optional } from 'sequelize';
 import { randomBytes } from 'crypto';
-import { sequelize, useSupabase } from '../config/database';
+import sequelize from '../config/database';
 import { UserRole } from '../types';
-
-// Supabase interfaces
-export interface AppRow {
-  id: number;
-  name: string;
-  slug: string;
-  description: string;
-  owner_id: number;
-  github_repo_url?: string;
-  app_key: string;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface AppUserRow {
-  app_id: number;
-  user_id: number;
-  role: UserRole;
-  created_at: string;
-  updated_at: string;
-}
 
 // Shared interfaces
 export interface AppAttributes {
@@ -70,6 +49,19 @@ class App extends Model<AppAttributes, AppInput> implements AppAttributes {
   // Static method to generate app keys
   static generateAppKey(): string {
     return randomBytes(16).toString('hex');
+  }
+
+  // Define associations
+  static associate(models: any) {
+    App.hasMany(models.Update, { foreignKey: 'appId', as: 'updates' });
+    App.belongsToMany(models.User, {
+      through: models.AppUser,
+      foreignKey: 'appId',
+      otherKey: 'userId',
+      as: 'users'
+    });
+    App.hasMany(models.Bundle, { foreignKey: 'appId', as: 'bundles' });
+    App.hasMany(models.Manifest, { foreignKey: 'appId', as: 'manifests' });
   }
 }
 
@@ -129,20 +121,5 @@ App.init({
   timestamps: true,
   underscored: true,
 });
-
-// Convert Supabase row to App object
-export function mapToApp(data: AppRow): AppAttributes {
-  return {
-    id: data.id,
-    name: data.name,
-    slug: data.slug,
-    description: data.description,
-    ownerId: data.owner_id,
-    githubRepoUrl: data.github_repo_url,
-    appKey: data.app_key,
-    createdAt: new Date(data.created_at),
-    updatedAt: new Date(data.updated_at)
-  };
-}
 
 export default App;

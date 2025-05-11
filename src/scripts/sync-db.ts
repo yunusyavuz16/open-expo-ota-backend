@@ -1,31 +1,53 @@
 #!/usr/bin/env node
 
-import { sequelize } from '../db/models';
 import chalk from 'chalk';
+import dotenv from 'dotenv';
+import { sequelize } from '../config/database';
+import { generateModelSQL, runSQL } from '../db/sequelize-supabase-sync';
+
+// Load environment variables
+dotenv.config();
+
+// Check if we're using Supabase
+const useSupabase = process.env.USE_SUPABASE === 'true';
 
 /**
- * This script synchronizes the database with the model definitions.
- * CAUTION: This will alter tables to match the models, which could result in data loss.
- * It's recommended to use migrations in production environments.
+ * Sync database with current models
+ * CAUTION: This is for development use only!
  */
 async function syncDatabase() {
   try {
-    console.log(chalk.cyan('Starting database synchronization...'));
-    console.log(chalk.yellow('⚠️  WARNING: This will alter database tables to match models'));
-    console.log(chalk.yellow('⚠️  Make sure you have a backup of your data'));
+    console.log(chalk.cyan('Synchronizing database with models...'));
+    console.log(chalk.yellow('CAUTION: This operation may modify your database structure!'));
 
-    // Wait for user input in non-production environments
-    if (process.env.NODE_ENV !== 'production') {
-      console.log(chalk.yellow('Press Ctrl+C to cancel or wait 5 seconds to continue...'));
-      await new Promise(resolve => setTimeout(resolve, 5000));
+    if (process.env.NODE_ENV === 'production') {
+      console.error(chalk.red('❌ This script should not be used in production!'));
+      console.log(chalk.red('Use proper migrations instead.'));
+      process.exit(1);
     }
 
-    console.log(chalk.cyan('Syncing database schema...'));
+    if (useSupabase) {
+      // For Supabase, we generate SQL and run it
+      console.log(chalk.cyan('Syncing with Supabase...'));
 
-    // Alter tables to match the models
-    await sequelize.sync({ alter: true });
+      // Generate SQL from models
+      const sql = await generateModelSQL();
+      console.log(chalk.gray('Generated SQL:'));
+      console.log(chalk.gray(sql));
 
-    console.log(chalk.green('✅ Database successfully synchronized!'));
+      // Run the SQL
+      await runSQL(sql);
+
+      console.log(chalk.green('✅ Database synchronized with models!'));
+    } else {
+      // For direct PostgreSQL, we use Sequelize sync
+      console.log(chalk.cyan('Syncing with PostgreSQL...'));
+
+      await sequelize.sync({ alter: true });
+
+      console.log(chalk.green('✅ Database synchronized with models!'));
+    }
+
     process.exit(0);
   } catch (error) {
     console.error(chalk.red('Error synchronizing database:'), error);
@@ -33,5 +55,4 @@ async function syncDatabase() {
   }
 }
 
-// Run the sync function
 syncDatabase();

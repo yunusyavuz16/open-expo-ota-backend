@@ -1,8 +1,6 @@
 import { Model, DataTypes, Optional } from 'sequelize';
 import sequelize from '../config/database';
 import { UserRole } from '../types';
-import App from './App';
-import User from './User';
 
 interface AppUserAttributes {
   id: number;
@@ -24,6 +22,12 @@ class AppUser extends Model<AppUserAttributes, AppUserInput> implements AppUserA
 
   public readonly createdAt!: Date;
   public readonly updatedAt!: Date;
+
+  // Define associations
+  static associate(models: any) {
+    // AppUser has no direct associations to define
+    // The associations are handled in the User and App models
+  }
 }
 
 AppUser.init({
@@ -35,18 +39,12 @@ AppUser.init({
   appId: {
     type: DataTypes.INTEGER,
     allowNull: false,
-    references: {
-      model: App,
-      key: 'id',
-    },
+    field: 'app_id',
   },
   userId: {
     type: DataTypes.INTEGER,
     allowNull: false,
-    references: {
-      model: User,
-      key: 'id',
-    },
+    field: 'user_id',
   },
   role: {
     type: DataTypes.ENUM(...Object.values(UserRole)),
@@ -57,6 +55,7 @@ AppUser.init({
   sequelize,
   tableName: 'app_users',
   timestamps: true,
+  underscored: true,
   indexes: [
     {
       unique: true,
@@ -64,9 +63,5 @@ AppUser.init({
     },
   ],
 });
-
-// Set up associations
-App.belongsToMany(User, { through: AppUser, foreignKey: 'appId', as: 'users' });
-User.belongsToMany(App, { through: AppUser, foreignKey: 'userId', as: 'apps' });
 
 export default AppUser;

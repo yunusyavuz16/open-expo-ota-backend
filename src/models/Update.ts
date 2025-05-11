@@ -1,10 +1,6 @@
 import { Model, DataTypes, Optional } from 'sequelize';
 import sequelize from '../config/database';
 import { ReleaseChannel } from '../types';
-import App from './App';
-import User from './User';
-import Bundle from './Bundle';
-import Manifest from './Manifest';
 
 interface UpdateAttributes {
   id: number;
@@ -36,6 +32,15 @@ class Update extends Model<UpdateAttributes, UpdateInput> implements UpdateAttri
 
   public readonly createdAt!: Date;
   public readonly updatedAt!: Date;
+
+  // Define associations
+  static associate(models: any) {
+    Update.belongsTo(models.App, { foreignKey: 'appId', as: 'app' });
+    Update.belongsTo(models.User, { foreignKey: 'publishedBy', as: 'publisher' });
+    Update.belongsTo(models.Bundle, { foreignKey: 'bundleId', as: 'bundle' });
+    Update.belongsTo(models.Manifest, { foreignKey: 'manifestId', as: 'manifest', constraints: false });
+    Update.hasMany(models.Asset, { foreignKey: 'updateId', as: 'assets' });
+  }
 }
 
 Update.init({
@@ -47,10 +52,7 @@ Update.init({
   appId: {
     type: DataTypes.INTEGER,
     allowNull: false,
-    references: {
-      model: App,
-      key: 'id',
-    },
+    field: 'app_id',
   },
   version: {
     type: DataTypes.STRING,
@@ -64,40 +66,44 @@ Update.init({
   runtimeVersion: {
     type: DataTypes.STRING,
     allowNull: false,
+    field: 'runtime_version',
   },
   isRollback: {
     type: DataTypes.BOOLEAN,
     allowNull: false,
     defaultValue: false,
+    field: 'is_rollback',
   },
   bundleId: {
     type: DataTypes.INTEGER,
     allowNull: false,
-    references: {
-      model: Bundle,
-      key: 'id',
-    },
+    field: 'bundle_id',
   },
   manifestId: {
     type: DataTypes.INTEGER,
     allowNull: false,
-    references: {
-      model: Manifest,
-      key: 'id',
-    },
+    field: 'manifest_id',
   },
   publishedBy: {
     type: DataTypes.INTEGER,
     allowNull: false,
-    references: {
-      model: User,
-      key: 'id',
-    },
+    field: 'published_by',
+  },
+  createdAt: {
+    type: DataTypes.DATE,
+    allowNull: false,
+    field: 'created_at',
+  },
+  updatedAt: {
+    type: DataTypes.DATE,
+    allowNull: false,
+    field: 'updated_at',
   },
 }, {
   sequelize,
   tableName: 'updates',
   timestamps: true,
+  underscored: true,
   indexes: [
     {
       unique: true,
@@ -105,19 +111,5 @@ Update.init({
     },
   ],
 });
-
-// Set up associations
-App.hasMany(Update, { foreignKey: 'appId', as: 'updates' });
-Update.belongsTo(App, { foreignKey: 'appId', as: 'app' });
-
-User.hasMany(Update, { foreignKey: 'publishedBy', as: 'publishedUpdates' });
-Update.belongsTo(User, { foreignKey: 'publishedBy', as: 'publisher' });
-
-Bundle.hasMany(Update, { foreignKey: 'bundleId', as: 'updates' });
-Update.belongsTo(Bundle, { foreignKey: 'bundleId', as: 'bundle' });
-
-// Fix circular reference between Update and Manifest
-Manifest.hasOne(Update, { foreignKey: 'manifestId', as: 'update', constraints: false });
-Update.belongsTo(Manifest, { foreignKey: 'manifestId', as: 'manifest', constraints: false });
 
 export default Update;

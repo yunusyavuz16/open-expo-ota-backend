@@ -1,6 +1,5 @@
 import { Model, DataTypes, Optional } from 'sequelize';
 import sequelize from '../config/database';
-import App from './App';
 
 interface BundleAttributes {
   id: number;
@@ -26,6 +25,12 @@ class Bundle extends Model<BundleAttributes, BundleInput> implements BundleAttri
 
   public readonly createdAt!: Date;
   public readonly updatedAt!: Date;
+
+  // Define associations
+  static associate(models: any) {
+    Bundle.belongsTo(models.App, { foreignKey: 'appId', as: 'app' });
+    Bundle.hasMany(models.Update, { foreignKey: 'bundleId', as: 'updates' });
+  }
 }
 
 Bundle.init({
@@ -37,10 +42,7 @@ Bundle.init({
   appId: {
     type: DataTypes.INTEGER,
     allowNull: false,
-    references: {
-      model: App,
-      key: 'id',
-    },
+    field: 'app_id',
   },
   hash: {
     type: DataTypes.STRING,
@@ -51,10 +53,12 @@ Bundle.init({
     type: DataTypes.STRING,
     allowNull: false,
     defaultValue: 'local',
+    field: 'storage_type',
   },
   storagePath: {
     type: DataTypes.STRING,
     allowNull: false,
+    field: 'storage_path',
   },
   size: {
     type: DataTypes.INTEGER,
@@ -64,10 +68,7 @@ Bundle.init({
   sequelize,
   tableName: 'bundles',
   timestamps: true,
+  underscored: true,
 });
-
-// Set up associations
-App.hasMany(Bundle, { foreignKey: 'appId', as: 'bundles' });
-Bundle.belongsTo(App, { foreignKey: 'appId', as: 'app' });
 
 export default Bundle;

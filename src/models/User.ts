@@ -26,6 +26,17 @@ class User extends Model<UserAttributes, UserInput> implements UserAttributes {
 
   public readonly createdAt!: Date;
   public readonly updatedAt!: Date;
+
+  // Define associations
+  static associate(models: any) {
+    User.hasMany(models.Update, { foreignKey: 'publishedBy', as: 'publishedUpdates' });
+    User.belongsToMany(models.App, {
+      through: models.AppUser,
+      foreignKey: 'userId',
+      otherKey: 'appId',
+      as: 'apps'
+    });
+  }
 }
 
 User.init({
@@ -38,6 +49,7 @@ User.init({
     type: DataTypes.INTEGER,
     allowNull: false,
     unique: true,
+    field: 'github_id',
   },
   username: {
     type: DataTypes.STRING,
@@ -58,11 +70,13 @@ User.init({
   accessToken: {
     type: DataTypes.STRING,
     allowNull: false,
+    field: 'access_token',
   },
 }, {
   sequelize,
   tableName: 'users',
   timestamps: true,
+  underscored: true,
 });
 
 export default User;

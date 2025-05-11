@@ -1,6 +1,5 @@
 import { Model, DataTypes, Optional } from 'sequelize';
 import sequelize from '../config/database';
-import Update from './Update';
 
 interface AssetAttributes {
   id: number;
@@ -28,6 +27,11 @@ class Asset extends Model<AssetAttributes, AssetInput> implements AssetAttribute
 
   public readonly createdAt!: Date;
   public readonly updatedAt!: Date;
+
+  // Define associations
+  static associate(models: any) {
+    Asset.belongsTo(models.Update, { foreignKey: 'updateId', as: 'update' });
+  }
 }
 
 Asset.init({
@@ -39,10 +43,7 @@ Asset.init({
   updateId: {
     type: DataTypes.INTEGER,
     allowNull: false,
-    references: {
-      model: Update,
-      key: 'id',
-    },
+    field: 'update_id',
   },
   name: {
     type: DataTypes.STRING,
@@ -57,10 +58,12 @@ Asset.init({
     type: DataTypes.STRING,
     allowNull: false,
     defaultValue: 'local',
+    field: 'storage_type',
   },
   storagePath: {
     type: DataTypes.STRING,
     allowNull: false,
+    field: 'storage_path',
   },
   size: {
     type: DataTypes.INTEGER,
@@ -70,10 +73,7 @@ Asset.init({
   sequelize,
   tableName: 'assets',
   timestamps: true,
+  underscored: true,
 });
-
-// Set up associations
-Update.hasMany(Asset, { foreignKey: 'updateId', as: 'assets' });
-Asset.belongsTo(Update, { foreignKey: 'updateId', as: 'update' });
 
 export default Asset;

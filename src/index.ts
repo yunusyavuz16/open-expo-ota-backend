@@ -5,13 +5,15 @@ import passport from 'passport';
 import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
+import chalk from 'chalk';
+import { db } from './db/context';
 
 // Load environment variables
 dotenv.config();
 
 // Import configuration
 import './config/passport';
-import { initDatabase } from './config/database';
+import { initDatabase } from './db';
 
 // Import routes
 import authRoutes from './routes/auth';
@@ -34,7 +36,10 @@ if (!fs.existsSync(tempDir)) {
 }
 
 // Middleware
-app.use(cors());
+app.use(cors({
+  origin: process.env.CLIENT_URL?.split(',') || '*',
+  credentials: true
+}));
 app.use(morgan('dev'));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -48,22 +53,29 @@ app.use('/api', apiRoutes);
 app.use('/assets', express.static(path.join(__dirname, '../uploads')));
 
 // Health check endpoint
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok', version: process.env.npm_package_version });
 });
 
-// Start server
-(async () => {
+// Initialize database and start server
+async function startServer() {
   try {
     // Initialize database
+    console.log(chalk.yellow('Initializing database...'));
     await initDatabase();
 
-    // Start server
+    // Initialize database context
+    console.log(chalk.yellow('Initializing database context...'));
+    await db.initialize();
+
+    // Start the server
     app.listen(PORT, () => {
-      console.log(`Server running on port ${PORT}`);
-      console.log(`Health check: http://localhost:${PORT}/health`);
+      console.log(chalk.green(`Server running on port ${PORT}`));
     });
   } catch (error) {
-    console.error('Failed to start server:', error);
+    console.error(chalk.red('Failed to start server:'), error);
+    process.exit(1);
   }
-})();
+}
+
+startServer();

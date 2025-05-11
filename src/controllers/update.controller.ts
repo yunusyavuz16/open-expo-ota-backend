@@ -6,6 +6,8 @@ import { Update, Bundle, Manifest, Asset, App } from '../models';
 import { ReleaseChannel, Platform, User } from '../types';
 import { storeFile, generateStorageKey } from '../utils/storage';
 import { generateManifest, isCompatibleRuntimeVersion } from '../utils/manifest';
+import { db } from '../db/context';
+import { createHash } from 'crypto';
 
 // Define the expected structure of req.files from multer
 interface MulterFile {
@@ -179,31 +181,53 @@ export const createUpdate = async (req: Request, res: Response): Promise<void> =
 export const getUpdates = async (req: Request, res: Response): Promise<void> => {
   try {
     const appId = parseInt(req.params.appId, 10);
-    const { channel } = req.query;
+    const channel = req.query.channel as ReleaseChannel || undefined;
+    const platform = req.query.platform as Platform || undefined;
 
-    // Check if app exists
-    const app = await App.findByPk(appId);
-    if (!app) {
-      res.status(404).json({ message: 'App not found' });
+    // Validate appId
+    if (isNaN(appId)) {
+      res.status(400).json({ message: 'Invalid app ID' });
       return;
     }
 
-    // Build query
-    const query: any = { appId };
+    // Build query filters
+    const filters: any = { appId };
     if (channel) {
-      query.channel = channel;
+      filters.channel = channel;
     }
 
     // Get updates
-    const updates = await Update.findAll({
-      where: query,
-      order: [['createdAt', 'DESC']],
+    const updates = await db.models.Update.findAll({
+      where: filters,
+      include: [
+        {
+          model: db.models.Bundle,
+          as: 'bundle',
+          attributes: ['id', 'hash', 'size']
+        },
+        {
+          model: db.models.Asset,
+          as: 'assets',
+          attributes: ['id', 'name', 'hash', 'size']
+        },
+        {
+          model: db.models.User,
+          as: 'publisher',
+          attributes: ['id', 'username', 'email']
+        }
+      ],
+      order: [['createdAt', 'DESC']]
     });
 
-    res.json(updates);
+    // Filter updates by platform if specified
+    const filteredUpdates = platform
+      ? updates.filter(update => update.platforms.includes(platform))
+      : updates;
+
+    res.json(filteredUpdates);
   } catch (error) {
     console.error('Error fetching updates:', error);
-    res.status(500).json({ message: 'Error fetching updates' });
+    res.status(500).json({ message: 'Server error while fetching updates' });
   }
 };
 
@@ -212,21 +236,37 @@ export const getUpdate = async (req: Request, res: Response): Promise<void> => {
     const appId = parseInt(req.params.appId, 10);
     const updateId = parseInt(req.params.id, 10);
 
-    // Check if app exists
-    const app = await App.findByPk(appId);
-    if (!app) {
-      res.status(404).json({ message: 'App not found' });
+    // Validate IDs
+    if (isNaN(appId) || isNaN(updateId)) {
+      res.status(400).json({ message: 'Invalid app or update ID' });
       return;
     }
 
-    // Get update
-    const update = await Update.findOne({
+    // Find the update
+    const update = await db.models.Update.findOne({
       where: { id: updateId, appId },
       include: [
-        { model: Manifest, as: 'manifest' },
-        { model: Bundle, as: 'bundle' },
-        { model: Asset, as: 'assets' },
-      ],
+        {
+          model: db.models.Bundle,
+          as: 'bundle',
+          attributes: ['id', 'hash', 'storagePath', 'size']
+        },
+        {
+          model: db.models.Asset,
+          as: 'assets',
+          attributes: ['id', 'name', 'hash', 'storagePath', 'size']
+        },
+        {
+          model: db.models.Manifest,
+          as: 'manifest',
+          attributes: ['id', 'content', 'hash']
+        },
+        {
+          model: db.models.User,
+          as: 'publisher',
+          attributes: ['id', 'username', 'email']
+        }
+      ]
     });
 
     if (!update) {
@@ -237,216 +277,98 @@ export const getUpdate = async (req: Request, res: Response): Promise<void> => {
     res.json(update);
   } catch (error) {
     console.error('Error fetching update:', error);
-    res.status(500).json({ message: 'Error fetching update' });
+    res.status(500).json({ message: 'Server error while fetching update' });
   }
 };
 
 export const getManifest = async (req: Request, res: Response): Promise<void> => {
   try {
-    const appSlug = req.params.appSlug;
-    const {
-      platform = Platform.IOS,
-      channel = ReleaseChannel.PRODUCTION,
-      runtimeVersion,
-    } = req.query;
+    const { appSlug } = req.params;
+    const channel = req.query.channel as ReleaseChannel || ReleaseChannel.PRODUCTION;
+    const platform = req.query.platform as Platform || Platform.IOS;
+    const runtimeVersion = req.query.runtimeVersion as string;
 
-    if (!runtimeVersion) {
-      res.status(400).json({ message: 'Runtime version is required' });
-      return;
-    }
+    // Find the app by slug
+    const app = await db.models.App.findOne({
+      where: { slug: appSlug }
+    });
 
-    // Get app by slug
-    const app = await App.findOne({ where: { slug: appSlug } });
     if (!app) {
       res.status(404).json({ message: 'App not found' });
       return;
     }
 
-    // Find latest update for platform, channel, and compatible with runtimeVersion
-    const updates = await Update.findAll({
-      where: {
-        appId: app.id,
-        channel: channel as ReleaseChannel,
-        runtimeVersion: runtimeVersion as string,
-      },
-      order: [['createdAt', 'DESC']],
-      include: [{ model: Manifest, as: 'manifest' }],
+    // Build query for updates
+    const query: any = {
+      appId: app.id,
+      channel
+    };
+
+    if (runtimeVersion) {
+      query.runtimeVersion = runtimeVersion;
+    }
+
+    // Find the latest update for the app in the specified channel
+    const update = await db.models.Update.findOne({
+      where: query,
+      include: [
+        {
+          model: db.models.Manifest,
+          as: 'manifest'
+        }
+      ],
+      order: [['createdAt', 'DESC']]
     });
 
-    if (!updates || updates.length === 0) {
-      res.status(404).json({ message: 'No compatible updates found' });
+    if (!update) {
+      res.status(404).json({ message: 'No updates available' });
       return;
     }
 
-    // Get the latest update with its manifest
-    const latestUpdate = updates[0];
-    const updateManifest = latestUpdate.manifest;
-
-    // Check if platform is supported
-    if (!updateManifest || !updateManifest.platforms.includes(platform as Platform)) {
-      res.status(404).json({ message: 'Platform not supported by this update' });
+    // Check if update supports the requested platform
+    if (!update.platforms.includes(platform)) {
+      res.status(404).json({ message: `No update available for platform ${platform}` });
       return;
     }
 
-    // Return manifest content
-    res.json(updateManifest.content);
+    // Parse manifest content
+    const manifestContent = JSON.parse(update.manifest.content);
+
+    // Return the manifest
+    res.json(manifestContent);
   } catch (error) {
     console.error('Error fetching manifest:', error);
-    res.status(500).json({ message: 'Error fetching manifest' });
+    res.status(500).json({ message: 'Server error while fetching manifest' });
   }
 };
 
 export const promoteUpdate = async (req: Request, res: Response): Promise<void> => {
-  try {
-    const { user } = req as FileRequest;
-    const appId = parseInt(req.params.appId, 10);
-    const updateId = parseInt(req.params.id, 10);
-    const { channel } = req.body;
-
-    // Validate channel
-    if (!channel || !Object.values(ReleaseChannel).includes(channel)) {
-      res.status(400).json({
-        message: 'Valid channel is required',
-        validChannels: Object.values(ReleaseChannel)
-      });
-      return;
-    }
-
-    // Check if app exists
-    const app = await App.findByPk(appId);
-    if (!app) {
-      res.status(404).json({ message: 'App not found' });
-      return;
-    }
-
-    // Get update with manifest
-    const update = await Update.findOne({
-      where: { id: updateId, appId },
-      include: [
-        { model: Manifest, as: 'manifest' },
-        { model: Bundle, as: 'bundle' },
-      ],
-    });
-
-    if (!update) {
-      res.status(404).json({ message: 'Update not found' });
-      return;
-    }
-
-    // Create a new update with the new channel
-    const promotedUpdate = await Update.create({
-      appId,
-      version: update.version,
-      channel: channel as ReleaseChannel,
-      runtimeVersion: update.runtimeVersion,
-      isRollback: false,
-      bundleId: update.bundleId,
-      manifestId: update.manifestId,
-      publishedBy: user.id,
-    });
-
-    // Update the manifest with the new channel
-    const updateManifest = update.manifest;
-    if (updateManifest) {
-      const manifestContent = {
-        ...updateManifest.content,
-        channel: channel
-      };
-
-      const newManifest = await Manifest.create({
-        appId,
-        updateId: promotedUpdate.id,
-        version: updateManifest.version,
-        channel: channel as ReleaseChannel,
-        runtimeVersion: updateManifest.runtimeVersion,
-        platforms: updateManifest.platforms,
-        content: manifestContent,
-      });
-
-      // Update the promoted update with the new manifest
-      await promotedUpdate.update({ manifestId: newManifest.id });
-    }
-
-    // Copy assets to the new update
-    const assets = await Asset.findAll({ where: { updateId: updateId } });
-    for (const asset of assets) {
-      await Asset.create({
-        updateId: promotedUpdate.id,
-        name: asset.name,
-        hash: asset.hash,
-        storageType: asset.storageType,
-        storagePath: asset.storagePath,
-        size: asset.size,
-      });
-    }
-
-    res.json({
-      message: `Update promoted to ${channel} channel successfully`,
-      update: promotedUpdate
-    });
-  } catch (error) {
-    console.error('Error promoting update:', error);
-    res.status(500).json({ message: 'Error promoting update' });
-  }
+  // Implementation for promotion logic
+  res.status(501).json({ message: 'Promotion functionality not implemented yet' });
 };
 
 export const rollbackUpdate = async (req: Request, res: Response): Promise<void> => {
-  try {
-    const { user } = req as FileRequest;
-    const appId = parseInt(req.params.appId, 10);
-    const updateId = parseInt(req.params.id, 10);
-
-    // Check if app exists
-    const app = await App.findByPk(appId);
-    if (!app) {
-      res.status(404).json({ message: 'App not found' });
-      return;
-    }
-
-    // Get update to rollback
-    const updateToRollback = await Update.findOne({
-      where: { id: updateId, appId },
-    });
-
-    if (!updateToRollback) {
-      res.status(404).json({ message: 'Update not found' });
-      return;
-    }
-
-    // Create a new update that's a rollback of the specified update
-    const rollbackUpdate = await Update.create({
-      appId,
-      version: `${updateToRollback.version}-rollback`,
-      channel: updateToRollback.channel,
-      runtimeVersion: updateToRollback.runtimeVersion,
-      isRollback: true,
-      bundleId: updateToRollback.bundleId,
-      manifestId: updateToRollback.manifestId,
-      publishedBy: user.id,
-    });
-
-    res.json(rollbackUpdate);
-  } catch (error) {
-    console.error('Error rolling back update:', error);
-    res.status(500).json({ message: 'Error rolling back update' });
-  }
+  // Implementation for rollback logic
+  res.status(501).json({ message: 'Rollback functionality not implemented yet' });
 };
 
 export const getBundleFile = async (req: Request, res: Response): Promise<void> => {
   try {
-    const appSlug = req.params.appSlug;
-    const bundleId = parseInt(req.params.bundleId, 10);
+    const { appSlug, bundleId } = req.params;
 
-    // Get app by slug
-    const app = await App.findOne({ where: { slug: appSlug } });
+    // Find the app by slug
+    const app = await db.models.App.findOne({
+      where: { slug: appSlug }
+    });
+
     if (!app) {
       res.status(404).json({ message: 'App not found' });
       return;
     }
 
-    // Get bundle
-    const bundle = await Bundle.findOne({
-      where: { id: bundleId, appId: app.id },
+    // Find the bundle
+    const bundle = await db.models.Bundle.findOne({
+      where: { id: bundleId, appId: app.id }
     });
 
     if (!bundle) {
@@ -454,55 +376,49 @@ export const getBundleFile = async (req: Request, res: Response): Promise<void> 
       return;
     }
 
-    // Determine file path based on storage type
-    let filePath: string;
-    if (bundle.storageType === 'local') {
-      filePath = path.join(process.env.LOCAL_STORAGE_PATH || './storage', bundle.storagePath);
-    } else {
-      // For S3 or other storage types, implement the retrieval logic
-      res.status(501).json({ message: 'S3 storage not implemented yet' });
-      return;
-    }
+    // Get the bundle file path
+    const bundlePath = path.join(__dirname, '../../', bundle.storagePath);
 
     // Check if file exists
-    if (!fs.existsSync(filePath)) {
+    if (!fs.existsSync(bundlePath)) {
       res.status(404).json({ message: 'Bundle file not found' });
       return;
     }
 
-    // Set headers
-    res.setHeader('Content-Type', 'application/javascript');
-    res.setHeader('Content-Disposition', `attachment; filename=bundle.js`);
+    // Set appropriate headers
+    res.set('Content-Type', 'application/javascript');
+    res.set('Content-Disposition', `attachment; filename="bundle-${bundleId}.js"`);
 
-    // Stream the file
-    fs.createReadStream(filePath).pipe(res);
+    // Send the file
+    res.sendFile(bundlePath);
   } catch (error) {
-    console.error('Error serving bundle file:', error);
-    res.status(500).json({ message: 'Error serving bundle file' });
+    console.error('Error fetching bundle file:', error);
+    res.status(500).json({ message: 'Server error while fetching bundle file' });
   }
 };
 
 export const getAssetFile = async (req: Request, res: Response): Promise<void> => {
   try {
-    const appSlug = req.params.appSlug;
-    const assetId = parseInt(req.params.assetId, 10);
+    const { appSlug, assetId } = req.params;
 
-    // Get app by slug
-    const app = await App.findOne({ where: { slug: appSlug } });
+    // Find the app by slug
+    const app = await db.models.App.findOne({
+      where: { slug: appSlug }
+    });
+
     if (!app) {
       res.status(404).json({ message: 'App not found' });
       return;
     }
 
-    // Get asset
-    const asset = await Asset.findOne({
+    // Find the asset
+    const asset = await db.models.Asset.findOne({
       where: { id: assetId },
       include: [
         {
-          model: Update,
+          model: db.models.Update,
           as: 'update',
-          where: { appId: app.id },
-          required: true
+          where: { appId: app.id }
         }
       ]
     });
@@ -512,32 +428,38 @@ export const getAssetFile = async (req: Request, res: Response): Promise<void> =
       return;
     }
 
-    // Determine file path based on storage type
-    let filePath: string;
-    if (asset.storageType === 'local') {
-      filePath = path.join(process.env.LOCAL_STORAGE_PATH || './storage', asset.storagePath);
-    } else {
-      // For S3 or other storage types, implement the retrieval logic
-      res.status(501).json({ message: 'S3 storage not implemented yet' });
-      return;
-    }
+    // Get the asset file path
+    const assetPath = path.join(__dirname, '../../', asset.storagePath);
 
     // Check if file exists
-    if (!fs.existsSync(filePath)) {
+    if (!fs.existsSync(assetPath)) {
       res.status(404).json({ message: 'Asset file not found' });
       return;
     }
 
-    // Set appropriate content type based on file extension
-    const contentType = getContentTypeFromFileName(asset.name);
-    res.setHeader('Content-Type', contentType);
-    res.setHeader('Content-Disposition', `attachment; filename=${asset.name}`);
+    // Set appropriate Content-Type based on file extension
+    const ext = path.extname(asset.name).toLowerCase();
+    let contentType = 'application/octet-stream'; // Default content type
 
-    // Stream the file
-    fs.createReadStream(filePath).pipe(res);
+    // Set content type based on file extension
+    if (ext === '.png') contentType = 'image/png';
+    else if (ext === '.jpg' || ext === '.jpeg') contentType = 'image/jpeg';
+    else if (ext === '.gif') contentType = 'image/gif';
+    else if (ext === '.svg') contentType = 'image/svg+xml';
+    else if (ext === '.json') contentType = 'application/json';
+    else if (ext === '.js') contentType = 'application/javascript';
+    else if (ext === '.css') contentType = 'text/css';
+    else if (ext === '.html') contentType = 'text/html';
+
+    // Set headers
+    res.set('Content-Type', contentType);
+    res.set('Content-Disposition', `attachment; filename="${asset.name}"`);
+
+    // Send the file
+    res.sendFile(assetPath);
   } catch (error) {
-    console.error('Error serving asset file:', error);
-    res.status(500).json({ message: 'Error serving asset file' });
+    console.error('Error fetching asset file:', error);
+    res.status(500).json({ message: 'Server error while fetching asset file' });
   }
 };
 

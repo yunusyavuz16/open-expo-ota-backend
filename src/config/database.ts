@@ -1,51 +1,28 @@
 import dotenv from 'dotenv';
 import { Sequelize } from 'sequelize';
-import supabase from './supabase';
 
 dotenv.config();
 
-// Check if we're using Supabase or direct PostgreSQL
-const useSupabase = process.env.USE_SUPABASE === 'true';
+// Create a direct PostgreSQL connection
+// Format: postgresql://postgres:[YOUR-PASSWORD]@dbhost:5432/dbname
+const connectionString = process.env.DATABASE_URL ||
+  `postgresql://${process.env.DB_USER || 'postgres'}:${encodeURIComponent(process.env.DB_PASSWORD || '')}@${process.env.DB_HOST || 'localhost'}:${process.env.DB_PORT || '5432'}/${process.env.DB_NAME || 'expo_ota_development'}`;
 
-// Create a Sequelize instance for direct PostgreSQL connection
-// This is used by the sequelize models if not using Supabase
-const sequelize = new Sequelize({
-  dialect: 'postgres',
-  host: process.env.PGHOST || 'localhost',
-  port: parseInt(process.env.PGPORT || '5432', 10),
-  username: process.env.PGUSER,
-  password: process.env.PGPASSWORD,
-  database: process.env.PGDATABASE,
-  logging: process.env.NODE_ENV === 'development',
-});
-
-export const initDatabase = async (): Promise<void> => {
-  try {
-    if (useSupabase) {
-      // Verify connection to Supabase
-      const { data, error } = await supabase.from('migrations').select('count').limit(1);
-
-      if (error) {
-        // Check if it's just because the migrations table doesn't exist yet
-        if (error.code === '42P01') { // PostgreSQL table doesn't exist
-          console.log('Migrations table not found. Run migrations to create schema.');
-        } else {
-          console.error('Unable to connect to Supabase:', error);
-          throw error;
-        }
-      } else {
-        console.log('Supabase connection has been established successfully.');
+// Set SSL options based on the environment
+const dialectOptions = {
+  ssl: process.env.NODE_ENV === 'production' || process.env.DB_SSL === 'true'
+    ? {
+        require: true,
+        rejectUnauthorized: false
       }
-    } else {
-      // Test Sequelize connection
-      await sequelize.authenticate();
-      console.log('PostgreSQL connection has been established successfully.');
-    }
-  } catch (error) {
-    console.error('Unable to connect to the database:', error);
-    throw error;
-  }
+    : false
 };
 
-export { sequelize, supabase, useSupabase };
+// Create the Sequelize instance
+const sequelize = new Sequelize(connectionString, {
+  dialect: 'postgres',
+  dialectOptions,
+  logging: process.env.NODE_ENV === 'development' ? console.log : false,
+});
+
 export default sequelize;

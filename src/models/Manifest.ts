@@ -1,7 +1,6 @@
 import { Model, DataTypes, Optional } from 'sequelize';
 import sequelize from '../config/database';
 import { Platform, ReleaseChannel } from '../types';
-import App from './App';
 
 interface ManifestAttributes {
   id: number;
@@ -31,6 +30,12 @@ class Manifest extends Model<ManifestAttributes, ManifestInput> implements Manif
 
   public readonly createdAt!: Date;
   public readonly updatedAt!: Date;
+
+  // Define associations
+  static associate(models: any) {
+    Manifest.belongsTo(models.App, { foreignKey: 'appId', as: 'app' });
+    Manifest.hasOne(models.Update, { foreignKey: 'manifestId', as: 'update' });
+  }
 }
 
 Manifest.init({
@@ -42,14 +47,12 @@ Manifest.init({
   appId: {
     type: DataTypes.INTEGER,
     allowNull: false,
-    references: {
-      model: App,
-      key: 'id',
-    },
+    field: 'app_id',
   },
   updateId: {
     type: DataTypes.INTEGER,
     allowNull: false,
+    field: 'update_id',
   },
   version: {
     type: DataTypes.STRING,
@@ -63,6 +66,7 @@ Manifest.init({
   runtimeVersion: {
     type: DataTypes.STRING,
     allowNull: false,
+    field: 'runtime_version',
   },
   platforms: {
     type: DataTypes.ARRAY(DataTypes.ENUM(...Object.values(Platform))),
@@ -76,10 +80,7 @@ Manifest.init({
   sequelize,
   tableName: 'manifests',
   timestamps: true,
+  underscored: true,
 });
-
-// Set up associations
-App.hasMany(Manifest, { foreignKey: 'appId', as: 'manifests' });
-Manifest.belongsTo(App, { foreignKey: 'appId', as: 'app' });
 
 export default Manifest;
