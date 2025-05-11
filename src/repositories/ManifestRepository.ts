@@ -16,20 +16,8 @@ const ManifestRepository = {
     });
   },
 
-  findByUpdateId: async (updateId: number) => {
-    return await Manifest.findOne({
-      where: { updateId }
-    });
-  },
-
   create: async (manifestData: any) => {
     return await Manifest.create(manifestData);
-  },
-
-  update: async (id: number, updateId: number) => {
-    const manifest = await Manifest.findByPk(id);
-    if (!manifest) return null;
-    return await manifest.update({ updateId });
   }
 };
 

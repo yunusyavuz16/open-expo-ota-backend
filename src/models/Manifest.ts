@@ -5,7 +5,6 @@ import { Platform, ReleaseChannel } from '../types';
 interface ManifestAttributes {
   id: number;
   appId: number;
-  updateId: number;
   version: string;
   channel: ReleaseChannel;
   runtimeVersion: string;
@@ -21,7 +20,6 @@ export interface ManifestOutput extends Required<ManifestAttributes> {}
 class Manifest extends Model<ManifestAttributes, ManifestInput> implements ManifestAttributes {
   public id!: number;
   public appId!: number;
-  public updateId!: number;
   public version!: string;
   public channel!: ReleaseChannel;
   public runtimeVersion!: string;
@@ -48,11 +46,6 @@ Manifest.init({
     type: DataTypes.INTEGER,
     allowNull: false,
     field: 'app_id',
-  },
-  updateId: {
-    type: DataTypes.INTEGER,
-    allowNull: false,
-    field: 'update_id',
   },
   version: {
     type: DataTypes.STRING,

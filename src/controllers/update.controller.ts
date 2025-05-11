@@ -140,7 +140,6 @@ export const createUpdate = async (req: Request, res: Response): Promise<void> =
 
     const manifest = await Manifest.create({
       appId,
-      updateId: 0, // Will update this after Update is created
       version,
       channel: channel as ReleaseChannel,
       runtimeVersion,
@@ -160,9 +159,7 @@ export const createUpdate = async (req: Request, res: Response): Promise<void> =
       publishedBy: user.id,
     });
 
-    // Update the updateId in manifest and assets
-    await manifest.update({ updateId: update.id });
-
+    // Update the assets with updateId
     for (const asset of assets) {
       await asset.update({ updateId: update.id });
     }
@@ -289,7 +286,7 @@ export const getManifest = async (req: Request, res: Response): Promise<void> =>
     const runtimeVersion = req.query.runtimeVersion as string;
 
     // Find the app by slug
-    const app = await db.models.App.findOne({
+    const app = await App.findOne({
       where: { slug: appSlug }
     });
 
@@ -309,14 +306,8 @@ export const getManifest = async (req: Request, res: Response): Promise<void> =>
     }
 
     // Find the latest update for the app in the specified channel
-    const update = await db.models.Update.findOne({
+    const update = await Update.findOne({
       where: query,
-      include: [
-        {
-          model: db.models.Manifest,
-          as: 'manifest'
-        }
-      ],
       order: [['createdAt', 'DESC']]
     });
 
@@ -325,17 +316,32 @@ export const getManifest = async (req: Request, res: Response): Promise<void> =>
       return;
     }
 
+    // Now fetch the manifest separately
+    const manifest = await Manifest.findByPk(update.manifestId);
+
+    if (!manifest) {
+      res.status(404).json({ message: 'Manifest not found' });
+      return;
+    }
+
     // Check if update supports the requested platform
-    if (!update.platforms.includes(platform)) {
+    const platforms = manifest.platforms || [];
+    if (!platforms.includes(platform)) {
       res.status(404).json({ message: `No update available for platform ${platform}` });
       return;
     }
 
-    // Parse manifest content
-    const manifestContent = JSON.parse(update.manifest.content);
+    // Parse manifest content and return it
+    try {
+      const manifestContent = typeof manifest.content === 'string'
+        ? JSON.parse(manifest.content)
+        : manifest.content;
 
-    // Return the manifest
-    res.json(manifestContent);
+      res.json(manifestContent);
+    } catch (error) {
+      console.error('Error parsing manifest content:', error);
+      res.status(500).json({ message: 'Error parsing manifest content' });
+    }
   } catch (error) {
     console.error('Error fetching manifest:', error);
     res.status(500).json({ message: 'Server error while fetching manifest' });
