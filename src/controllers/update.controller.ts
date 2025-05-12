@@ -39,12 +39,24 @@ export const createUpdate = async (req: Request, res: Response): Promise<void> =
   try {
     const { files, user } = req as FileRequest;
     const appId = parseInt(req.params.appId, 10);
+
+    // Parse the data field if it exists, otherwise use req.body directly
+    let updateData = req.body;
+
+    if (req.body.data && typeof req.body.data === 'string') {
+      try {
+        updateData = JSON.parse(req.body.data);
+      } catch (error) {
+        console.error('Error parsing update data JSON:', error);
+      }
+    }
+
     const {
       version,
       channel = ReleaseChannel.DEVELOPMENT,
       runtimeVersion,
       platforms = [Platform.IOS, Platform.ANDROID],
-    } = req.body;
+    } = updateData;
 
     // Validate input
     if (!version || !runtimeVersion) {
@@ -285,15 +297,20 @@ export const getManifest = async (req: Request, res: Response): Promise<void> =>
     const platform = req.query.platform as Platform || Platform.IOS;
     const runtimeVersion = req.query.runtimeVersion as string;
 
+    console.log(`[getManifest] Requested manifest for app: ${appSlug}, channel: ${channel}, platform: ${platform}, runtimeVersion: ${runtimeVersion}`);
+
     // Find the app by slug
     const app = await App.findOne({
       where: { slug: appSlug }
     });
 
     if (!app) {
+      console.log(`[getManifest] App not found: ${appSlug}`);
       res.status(404).json({ message: 'App not found' });
       return;
     }
+
+    console.log(`[getManifest] Found app with ID: ${app.id}`);
 
     // Build query for updates
     const query: any = {
@@ -308,42 +325,58 @@ export const getManifest = async (req: Request, res: Response): Promise<void> =>
     // Find the latest update for the app in the specified channel
     const update = await Update.findOne({
       where: query,
-      order: [['createdAt', 'DESC']]
+      order: [['createdAt', 'DESC']],
+      include: [
+        {
+          model: Manifest,
+          as: 'manifest'
+        }
+      ]
     });
 
     if (!update) {
+      console.log(`[getManifest] No updates found for app ID: ${app.id}, channel: ${channel}, runtimeVersion: ${runtimeVersion}`);
       res.status(404).json({ message: 'No updates available' });
       return;
     }
 
-    // Now fetch the manifest separately
-    const manifest = await Manifest.findByPk(update.manifestId);
+    console.log(`[getManifest] Found update ID: ${update.id}`);
 
+    // Explicitly check for manifest association
+    const manifest = update.get('manifest') as Manifest | undefined;
     if (!manifest) {
+      console.log(`[getManifest] No manifest found for update ID: ${update.id}`);
       res.status(404).json({ message: 'Manifest not found' });
       return;
     }
 
     // Check if update supports the requested platform
     const platforms = manifest.platforms || [];
-    if (!platforms.includes(platform)) {
+    if (platforms.length > 0 && !platforms.includes(platform)) {
+      console.log(`[getManifest] Update doesn't support platform: ${platform}`);
       res.status(404).json({ message: `No update available for platform ${platform}` });
       return;
     }
 
     // Parse manifest content and return it
     try {
-      const manifestContent = typeof manifest.content === 'string'
-        ? JSON.parse(manifest.content)
-        : manifest.content;
+      let manifestContent = manifest.content;
+      if (typeof manifestContent === 'string') {
+        try {
+          manifestContent = JSON.parse(manifestContent);
+        } catch (parseError) {
+          console.error('[getManifest] Error parsing manifest content:', parseError);
+        }
+      }
 
+      console.log(`[getManifest] Successfully returning manifest for update ID: ${update.id}`);
       res.json(manifestContent);
     } catch (error) {
-      console.error('Error parsing manifest content:', error);
-      res.status(500).json({ message: 'Error parsing manifest content' });
+      console.error('[getManifest] Error processing manifest content:', error);
+      res.status(500).json({ message: 'Error processing manifest content' });
     }
   } catch (error) {
-    console.error('Error fetching manifest:', error);
+    console.error('[getManifest] Error fetching manifest:', error);
     res.status(500).json({ message: 'Server error while fetching manifest' });
   }
 };

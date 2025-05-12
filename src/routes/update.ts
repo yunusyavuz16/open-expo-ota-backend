@@ -23,14 +23,23 @@ const upload = multer({
   }
 });
 
-// Create a new update
+// Create a new update - updated to handle FormData correctly
 router.post(
   '/:appId',
   authenticateJWT,
   requireAppAccess,
+  (req, res, next) => {
+    // Log the request for debugging
+    console.log('Update upload request received:', {
+      appId: req.params.appId,
+      contentType: req.headers['content-type'],
+      keys: Object.keys(req.body || {})
+    });
+    next();
+  },
   upload.fields([
     { name: 'bundle', maxCount: 1 },
-    { name: 'assets', maxCount: 10 }
+    { name: 'assets', maxCount: 20 } // Increased max count for assets
   ]),
   UpdateController.createUpdate
 );
