@@ -49,6 +49,9 @@ const calculateHash = (buffer: Buffer): string => {
 };
 
 export const createUpdate = async (req: Request, res: Response): Promise<void> => {
+  let zipPath: string | undefined;
+  let extractDir: string | undefined;
+
   try {
     // Cast request to include file without strict typing
     const reqWithFile = req as any;
@@ -139,17 +142,23 @@ export const createUpdate = async (req: Request, res: Response): Promise<void> =
       res.status(400).json({ message: 'Update package file is required' });
       return;
     }
+    zipPath = updatePackageFile.path; // Assign zipPath here
 
     console.log('STEP 3: Found update package file');
-
-    const zipPath = updatePackageFile.path;
-    console.log('Using update package file:', updatePackageFile.fieldname, updatePackageFile.originalname);
     console.log('File details:', {
       size: updatePackageFile.size,
       encoding: updatePackageFile.encoding,
       mimetype: updatePackageFile.mimetype,
       path: updatePackageFile.path
     });
+
+    // Explicit check for zipPath to satisfy linter, though flow implies it's a string
+    if (!zipPath) {
+      // This case should ideally not be reached if updatePackageFile.path is always a string
+      console.error('Critical error: zipPath is undefined after assignment.');
+      res.status(500).json({ message: 'Internal server error: Update package path not found after assignment.'});
+      return;
+    }
 
     // Verify the zip file exists and has content
     try {
@@ -194,7 +203,7 @@ export const createUpdate = async (req: Request, res: Response): Promise<void> =
     // Extract the update package
     console.log('STEP 4: Extracting update package...');
     const extractedUpdate = await extractUpdatePackage(zipPath);
-    const extractDir = path.dirname(extractedUpdate.bundlePath);
+    extractDir = path.dirname(extractedUpdate.bundlePath); // Assign extractDir here
     console.log('STEP 5: Successfully extracted update package:', {
       bundleHash: extractedUpdate.bundleHash,
       assets: extractedUpdate.assets.length,
@@ -285,15 +294,16 @@ export const createUpdate = async (req: Request, res: Response): Promise<void> =
         console.log('STEP 16: Creating asset records');
         const createdDbAssets: Asset[] = [];
         for (const assetFile of extractedUpdate.assets) { // assetFile has { path, buffer, hash, name }
-          const assetKey = generateStorageKey(appId, `assets/${newUpdate.id}`, assetFile.name);
+          const safeAssetStorageName = path.basename(assetFile.name); // Sanitize asset name for storage path
+          const assetKey = generateStorageKey(appId, `assets/${newUpdate.id}`, safeAssetStorageName);
           const storeResult = await storeFile(assetFile.buffer, assetKey); // Use .buffer
 
           const dbAsset = await Asset.create({
             updateId: newUpdate.id,
-            name: assetFile.name,
+            name: assetFile.name, // Store original name from zip (e.g., 'icons/home.png')
             hash: assetFile.hash,
             storageType: storeResult.storageType,
-            storagePath: storeResult.storagePath,
+            storagePath: storeResult.storagePath, // Based on safeAssetStorageName
             size: assetFile.buffer.length, // Use .buffer.length for size
           }, { transaction });
           createdDbAssets.push(dbAsset);
@@ -356,15 +366,6 @@ export const createUpdate = async (req: Request, res: Response): Promise<void> =
         await transaction.rollback();
         console.error('Error during update publishing transaction:', error);
         res.status(500).json({ message: 'Failed to publish update', error: (error as Error).message });
-      } finally {
-        console.log('STEP 24: Cleaning up temp extracted files');
-        await cleanupExtractedFiles(extractDir);
-        try {
-          fs.unlinkSync(zipPath);
-          console.log('STEP 25: Uploaded ZIP file cleaned up');
-        } catch (err) {
-          console.warn('Warning: Failed to clean up uploaded ZIP file:', err);
-        }
       }
     } finally {
       // Clean up extracted files
@@ -392,7 +393,26 @@ export const createUpdate = async (req: Request, res: Response): Promise<void> =
       console.error('Error cause:', error.cause);
     }
 
-    res.json({ status: 'error', message: `Error creating update: ${error.message || 'Unknown error'}` });
+    res.status(500).json({ message: `Error creating update: ${error.message || 'Unknown error'}` });
+  } finally {
+    if (extractDir) {
+      try {
+        console.log('Cleaning up temporary extracted files from:', extractDir);
+        await cleanupExtractedFiles(extractDir);
+        console.log('Temporary extracted files cleaned up successfully.');
+      } catch (err) {
+        console.warn('Warning: Failed to clean up extracted files:', err);
+      }
+    }
+    if (zipPath) {
+      try {
+        console.log('Cleaning up uploaded ZIP file:', zipPath);
+        fs.unlinkSync(zipPath);
+        console.log('Uploaded ZIP file cleaned up successfully.');
+      } catch (err) {
+        console.warn('Warning: Failed to clean up uploaded ZIP file:', err);
+      }
+    }
   }
 };
 
@@ -699,4 +719,11 @@ export const getAssetFile = async (req: Request, res: Response): Promise<void> =
 
     // Set headers
     res.set('Content-Type', contentType);
-    res.set('Content-Disposition', `
+    res.set('Content-Disposition', `attachment; filename="${path.basename(asset.name)}"`);
+    // Send the file
+    res.sendFile(assetPath);
+  } catch (error) {
+    console.error('Error fetching asset file:', error);
+    res.status(500).json({ message: 'Server error while fetching asset file' });
+  }
+};
