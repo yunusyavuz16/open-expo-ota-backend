@@ -1,6 +1,7 @@
 import { Model, DataTypes, Optional } from 'sequelize';
 import sequelize from '../config/database';
 import { ReleaseChannel, Platform } from '../types';
+import { Manifest, Bundle, Asset, App, User } from '.';
 
 interface UpdateAttributes {
   id: number;
@@ -8,6 +9,7 @@ interface UpdateAttributes {
   version: string;
   channel: ReleaseChannel;
   runtimeVersion: string;
+  targetVersionRange?: string;
   platforms: Platform[];
   isRollback: boolean;
   bundleId: number;
@@ -17,7 +19,7 @@ interface UpdateAttributes {
   updatedAt?: Date;
 }
 
-export interface UpdateInput extends Optional<UpdateAttributes, 'id' | 'isRollback' | 'createdAt' | 'updatedAt'> {}
+export interface UpdateInput extends Optional<UpdateAttributes, 'id' | 'isRollback' | 'createdAt' | 'updatedAt' | 'targetVersionRange'> {}
 export interface UpdateOutput extends Required<UpdateAttributes> {}
 
 class Update extends Model<UpdateAttributes, UpdateInput> implements UpdateAttributes {
@@ -26,11 +28,19 @@ class Update extends Model<UpdateAttributes, UpdateInput> implements UpdateAttri
   public version!: string;
   public channel!: ReleaseChannel;
   public runtimeVersion!: string;
+  public targetVersionRange?: string;
   public platforms!: Platform[];
   public isRollback!: boolean;
   public bundleId!: number;
   public manifestId!: number;
   public publishedBy!: number;
+
+  // Associations (eager loaded properties)
+  public readonly manifest?: Manifest;
+  public readonly bundle?: Bundle;
+  public readonly assets?: Asset[];
+  public readonly app?: App;
+  public readonly publisher?: User;
 
   public readonly createdAt!: Date;
   public readonly updatedAt!: Date;
@@ -69,6 +79,11 @@ Update.init({
     type: DataTypes.STRING,
     allowNull: false,
     field: 'runtime_version',
+  },
+  targetVersionRange: {
+    type: DataTypes.STRING,
+    allowNull: true,
+    field: 'target_version_range',
   },
   platforms: {
     type: DataTypes.ARRAY(DataTypes.ENUM(...Object.values(Platform))),

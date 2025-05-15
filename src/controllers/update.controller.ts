@@ -2,8 +2,10 @@ import { Request, Response } from 'express';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
-import { Update, Bundle, Manifest, Asset, App } from '../models';
-import { ReleaseChannel, Platform, User } from '../types';
+import semver from 'semver';
+import sequelize from '../config/database'; // Import sequelize instance
+import { Update, Bundle, Manifest, Asset, App, User } from '../models';
+import { ReleaseChannel, Platform } from '../types';
 import { storeFile, generateStorageKey } from '../utils/storage';
 import { generateManifest, isCompatibleRuntimeVersion } from '../utils/manifest';
 import { db } from '../db/context';
@@ -51,7 +53,7 @@ export const createUpdate = async (req: Request, res: Response): Promise<void> =
     // Cast request to include file without strict typing
     const reqWithFile = req as any;
     const appId = parseInt(req.params.appId, 10);
-    const user = reqWithFile.user;
+    const user = reqWithFile.user as User | undefined;
 
     // Log the request data for debugging
     console.log('Processing update request:', {
@@ -79,8 +81,28 @@ export const createUpdate = async (req: Request, res: Response): Promise<void> =
       version,
       channel = ReleaseChannel.DEVELOPMENT,
       runtimeVersion,
-      platforms = [Platform.IOS, Platform.ANDROID],
+      platforms,
+      targetVersionRange,
     } = req.body;
+
+    // Validate targetVersionRange if provided
+    if (targetVersionRange && typeof targetVersionRange === 'string' && !semver.validRange(targetVersionRange)) {
+      res.status(400).json({ message: 'Invalid targetVersionRange format.' });
+      return;
+    }
+
+    // Process platforms from request body (might be stringified JSON)
+    let parsedPlatformsFromBody = platforms;
+    if (typeof platforms === 'string') {
+      try {
+        parsedPlatformsFromBody = JSON.parse(platforms);
+      } catch (e) {
+        console.warn('Failed to parse platforms from request body string, using as is or default handling will apply.');
+        // Potentially set to a default or let normalizePlatforms handle it
+      }
+    }
+    // Normalize platforms (handles default if platforms is undefined or empty)
+    const normalizedBodyPlatforms = normalizePlatforms(parsedPlatformsFromBody || [Platform.IOS, Platform.ANDROID]);
 
     // Check if app exists
     const app = await App.findByPk(appId);
@@ -190,42 +212,15 @@ export const createUpdate = async (req: Request, res: Response): Promise<void> =
       console.log('Platforms from metadata:', extractedUpdate.metadata.platforms);
       console.log('Platforms from request body:', req.body.platforms);
 
-      // Parse platforms correctly - coming from either metadata or body
-      let updatePlatforms = extractedUpdate.metadata.platforms || [];
-
-      // If platforms is in the request body and is a string, try to parse it
-      if (req.body.platforms && typeof req.body.platforms === 'string') {
-        try {
-          const parsedPlatforms = JSON.parse(req.body.platforms);
-          // Ensure it's always an array
-          updatePlatforms = Array.isArray(parsedPlatforms) ? parsedPlatforms : [parsedPlatforms].filter(Boolean);
-        } catch (err) {
-          console.error('Error parsing platforms from request body:', err);
-        }
-      }
-
-      // If platforms is still empty, use a default value
-      if (!updatePlatforms || !updatePlatforms.length) {
-        updatePlatforms = [Platform.IOS, Platform.ANDROID];
-      }
-
-      // Ensure platforms is in the correct format for PostgreSQL ARRAY type - must be array of strings
-      if (!Array.isArray(updatePlatforms)) {
-        updatePlatforms = [updatePlatforms].filter(Boolean);
-      }
-
-      // Convert any non-string values to strings to ensure compatibility
-      updatePlatforms = updatePlatforms.map(p => String(p));
-
-      // Log the final parsed platforms for debugging
-      console.log('Final platforms value:', updatePlatforms);
-      console.log('Is Array:', Array.isArray(updatePlatforms));
-      console.log('Element Types:', updatePlatforms.map(p => typeof p));
-
-      // If metadata has version/runtimeVersion, they take precedence over form data
+      // If metadata has version/runtimeVersion/platforms, they take precedence over form data
       const updateVersion = extractedUpdate.metadata.version || version;
       const updateChannel = (extractedUpdate.metadata.channel || channel || ReleaseChannel.DEVELOPMENT) as ReleaseChannel;
       const updateRuntimeVersion = extractedUpdate.metadata.runtimeVersion || runtimeVersion;
+
+      // Platforms: Use metadata if available, otherwise use normalized platforms from body
+      const updatePlatforms = extractedUpdate.metadata.platforms && extractedUpdate.metadata.platforms.length > 0
+        ? normalizePlatforms(extractedUpdate.metadata.platforms)
+        : normalizedBodyPlatforms;
 
       // Validate required fields
       if (!updateVersion || !updateRuntimeVersion) {
@@ -267,195 +262,110 @@ export const createUpdate = async (req: Request, res: Response): Promise<void> =
         bundleId = bundle.id;
       }
 
-      // Process assets but don't create records yet - just store files and collect info
-      console.log('STEP 11: Processing assets');
-      const assetInfos: Array<{
-        name: string;
-        hash: string;
-        storageType: string;
-        storagePath: string;
-        size: number;
-      }> = [];
+      console.log('STEP 13: Storing manifest and assets');
 
-      for (const assetItem of extractedUpdate.assets) {
-        // Store asset file
-        console.log(`Processing asset: ${assetItem.name}`);
-        const assetKey = generateStorageKey(appId, 'assets', assetItem.name);
-        const storeResult = await storeFile(assetItem.buffer, assetKey);
+      const transaction = await sequelize.transaction();
 
-        // Just store the asset info for now - don't create in database yet
-        assetInfos.push({
-          name: assetItem.name,
-          hash: assetItem.hash,
-          storageType: storeResult.storageType,
-          storagePath: storeResult.storagePath,
-          size: storeResult.size,
+      try {
+        console.log('STEP 14: Creating new update record');
+        const newUpdate = await Update.create({
+          appId: appId,
+          version: updateVersion,
+          channel: updateChannel,
+          runtimeVersion: updateRuntimeVersion,
+          platforms: updatePlatforms, // Use the processed updatePlatforms from metadata or body
+          targetVersionRange: targetVersionRange || null, // Store targetVersionRange
+          bundleId: bundleId,
+          manifestId: 0, // Placeholder, will be updated after manifest creation
+          publishedBy: user?.id || 0,
+        }, { transaction });
+        console.log('STEP 15: New update record created successfully with ID:', newUpdate.id);
+
+        // Create Asset records from extractedUpdate.assets
+        console.log('STEP 16: Creating asset records');
+        const createdDbAssets: Asset[] = [];
+        for (const assetFile of extractedUpdate.assets) { // assetFile has { path, buffer, hash, name }
+          const assetKey = generateStorageKey(appId, `assets/${newUpdate.id}`, assetFile.name);
+          const storeResult = await storeFile(assetFile.buffer, assetKey); // Use .buffer
+
+          const dbAsset = await Asset.create({
+            updateId: newUpdate.id,
+            name: assetFile.name,
+            hash: assetFile.hash,
+            storageType: storeResult.storageType,
+            storagePath: storeResult.storagePath,
+            size: assetFile.buffer.length, // Use .buffer.length for size
+          }, { transaction });
+          createdDbAssets.push(dbAsset);
+          console.log(`Successfully created asset in DB: ${dbAsset.id} - ${assetFile.name}`);
+        }
+        console.log('STEP 17: All asset records created in DB');
+
+        // Prepare ManifestMetadata
+        const bundleRecord = await Bundle.findByPk(bundleId, { transaction });
+        if (!bundleRecord) throw new Error('Bundle record not found after creation/lookup');
+
+        const manifestMetadata: Parameters<typeof generateManifest>[0] = {
+          version: newUpdate.version,
+          runtimeVersion: newUpdate.runtimeVersion,
+          platforms: newUpdate.platforms as Platform[],
+          channel: newUpdate.channel,
+          bundleUrl: `${req.protocol}://${req.get('host')}/api/bundles/${app.slug}/${bundleRecord.id}`, // Construct bundle URL
+          bundleHash: bundleRecord.hash, // Hash from the Bundle record
+          createdAt: newUpdate.createdAt || new Date(),
+        };
+
+        console.log('STEP 18: Generating manifest content');
+        const manifestContent = generateManifest(manifestMetadata, createdDbAssets);
+        console.log('STEP 19: Manifest content generated');
+
+        const manifestRecord = await Manifest.create({
+          appId: appId,
+          version: newUpdate.version,
+          channel: newUpdate.channel,
+          runtimeVersion: newUpdate.runtimeVersion,
+          platforms: newUpdate.platforms as Platform[],
+          content: manifestContent,
+          hash: createHash('sha256').update(JSON.stringify(manifestContent)).digest('hex'),
+        }, { transaction });
+        console.log('STEP 20: Manifest record created with ID:', manifestRecord.id);
+
+        await newUpdate.update({ manifestId: manifestRecord.id }, { transaction });
+        console.log('STEP 21: Update record updated with manifest ID');
+
+        await transaction.commit();
+        console.log('STEP 22: Transaction committed');
+
+        const populatedUpdate = await Update.findByPk(newUpdate.id, {
+          include: [
+            { model: App, as: 'app' },
+            { model: Bundle, as: 'bundle' },
+            { model: Manifest, as: 'manifest' },
+            { model: Asset, as: 'assets' },
+            { model: User, as: 'publisher'}
+          ],
         });
-      }
 
-      console.log('STEP 12: Processed all assets');
+        res.status(201).json({
+          message: 'Update published successfully',
+          update: populatedUpdate,
+        });
+        console.log('STEP 23: Response sent!');
 
-      // Get bundle information
-      const bundle = await Bundle.findByPk(bundleId);
-      if (!bundle) {
-        res.status(500).json({ message: 'Bundle not found after creation' });
-        return;
-      }
-
-      console.log('STEP 13: Creating manifest');
-
-      // Create manifest
-      const manifestContent = generateManifest(
-        {
-          version: updateVersion,
-          runtimeVersion: updateRuntimeVersion,
-          platforms: updatePlatforms as Platform[],
-          channel: updateChannel as ReleaseChannel,
-          bundleUrl: `/api/assets/${bundle.storagePath}`,
-          bundleHash,
-          createdAt: new Date(),
-        },
-        []  // Empty array for now - we'll add assets to the manifest after creating them
-      );
-
-      // Generate a hash for the manifest content
-      const manifestHash = crypto.createHash('sha256')
-        .update(JSON.stringify(manifestContent))
-        .digest('hex');
-
-      console.log('STEP 14: Generated manifest hash:', manifestHash);
-
-      // Ensure platforms is always a properly typed array before creating the manifest
-      const validPlatforms = normalizePlatforms(updatePlatforms);
-
-      console.log('STEP 14.5: Valid platforms array:', validPlatforms);
-      console.log('Is Array:', Array.isArray(validPlatforms));
-      console.log('Length:', validPlatforms.length);
-      console.log('Elements:', validPlatforms.join(', '));
-      console.log('Types:', validPlatforms.map(p => typeof p).join(', '));
-
-      console.log('STEP 15: Creating manifest record in database');
-
-      const manifest = await Manifest.create({
-        appId,
-        version: updateVersion,
-        channel: updateChannel as ReleaseChannel,
-        runtimeVersion: updateRuntimeVersion,
-        platforms: validPlatforms,
-        content: manifestContent,
-        hash: manifestHash,
-      });
-
-      console.log('STEP 16: Created manifest with ID:', manifest.id);
-      console.log('STEP 17: Creating update record');
-
-      // Debug log the update creation object
-      console.log('Update creation object:', {
-        appId,
-        version: updateVersion,
-        channel: updateChannel,
-        runtimeVersion: updateRuntimeVersion,
-        platforms: validPlatforms,
-        isRollback: false,
-        bundleId,
-        manifestId: manifest.id,
-        publishedBy: user.id
-      });
-
-      // Create update - ensure platforms is included and is properly formatted as an array of valid Platform enum values
-      const update = await Update.create({
-        appId,
-        version: updateVersion,
-        channel: updateChannel as ReleaseChannel,
-        runtimeVersion: updateRuntimeVersion,
-        platforms: validPlatforms,
-        isRollback: false,
-        bundleId,
-        manifestId: manifest.id,
-        publishedBy: user.id,
-      });
-
-      console.log('STEP 18: Created update with ID:', update.id);
-      console.log('STEP 19: Creating asset records');
-
-      // Now create the assets with the correct updateId
-      const assets: Asset[] = [];
-      for (const assetInfo of assetInfos) {
+      } catch (error) {
+        await transaction.rollback();
+        console.error('Error during update publishing transaction:', error);
+        res.status(500).json({ message: 'Failed to publish update', error: (error as Error).message });
+      } finally {
+        console.log('STEP 24: Cleaning up temp extracted files');
+        await cleanupExtractedFiles(extractDir);
         try {
-          console.log(`Creating asset: ${assetInfo.name}`);
-          const asset = await Asset.create({
-            ...assetInfo,
-            updateId: update.id
-          });
-          console.log(`Successfully created asset: ${asset.id}`);
-          assets.push(asset);
+          fs.unlinkSync(zipPath);
+          console.log('STEP 25: Uploaded ZIP file cleaned up');
         } catch (err) {
-          console.error(`Error creating asset: ${assetInfo.name}`, err);
+          console.warn('Warning: Failed to clean up uploaded ZIP file:', err);
         }
       }
-
-      console.log('STEP 20: Created all asset records');
-      console.log('STEP 21: Updating manifest with asset information');
-
-      // Update the manifest with asset information
-      const updatedManifestContent = generateManifest(
-        {
-          version: updateVersion,
-          runtimeVersion: updateRuntimeVersion,
-          platforms: validPlatforms,
-          channel: updateChannel as ReleaseChannel,
-          bundleUrl: `/api/assets/${bundle.storagePath}`,
-          bundleHash,
-          createdAt: new Date(),
-        },
-        assets
-      );
-
-      // Update the manifest content
-      await manifest.update({
-        content: updatedManifestContent
-      });
-
-      console.log('STEP 22: Updated manifest content');
-      console.log('STEP 23: Preparing response');
-
-      // Get the update with related data for the response
-      const populatedUpdate = await Update.findOne({
-        where: { id: update.id },
-        include: [
-          { model: Bundle, as: 'bundle' },
-          { model: Asset, as: 'assets' }
-        ]
-      });
-
-      // Extract the bundle and assets properly with type checking
-      const updateBundle = populatedUpdate ? (populatedUpdate as any).bundle : null;
-      const updateAssets = populatedUpdate ? (populatedUpdate as any).assets || [] : [];
-
-      // Return the update with related data - structure it more consistently
-      res.status(201).json({
-        status: 'success',
-        message: 'Update processed successfully',
-        update: {
-          id: update.id,
-          appId: update.appId,
-          version: update.version,
-          channel: update.channel,
-          runtimeVersion: update.runtimeVersion,
-          platforms: update.platforms,
-          isRollback: update.isRollback,
-          createdAt: update.createdAt,
-          updatedAt: update.updatedAt,
-          publishedBy: update.publishedBy,
-          bundleId: update.bundleId,
-          manifestId: update.manifestId,
-          bundle: updateBundle,
-          assets: updateAssets,
-          manifest: updatedManifestContent
-        }
-      });
-
-      console.log('STEP 24: Response sent!');
     } finally {
       // Clean up extracted files
       console.log('STEP 25: Cleaning up temp files');
@@ -594,150 +504,84 @@ export const getManifest = async (req: Request, res: Response): Promise<void> =>
     const { appSlug } = req.params;
     const channel = req.query.channel as ReleaseChannel || ReleaseChannel.PRODUCTION;
     const platform = req.query.platform as Platform || Platform.IOS;
-    const runtimeVersion = req.query.runtimeVersion as string;
+    const clientRuntimeVersion = req.query.runtimeVersion as string;
 
-    console.log(`[getManifest] Requested manifest for app: ${appSlug}, channel: ${channel}, platform: ${platform}, runtimeVersion: ${runtimeVersion}`);
+    console.log(`[getManifest] Request: appSlug=${appSlug}, channel=${channel}, platform=${platform}, clientRuntimeVersion=${clientRuntimeVersion}`);
 
-    // Find the app by slug
-    const app = await App.findOne({
-      where: { slug: appSlug }
-    });
+    if (!clientRuntimeVersion) {
+      res.status(400).json({ message: 'runtimeVersion query parameter is required' });
+      return;
+    }
+    if (!semver.valid(clientRuntimeVersion)) {
+        res.status(400).json({ message: 'Invalid clientRuntimeVersion format.' });
+        return;
+    }
 
+    const app = await App.findOne({ where: { slug: appSlug } });
     if (!app) {
-      console.log(`[getManifest] App not found: ${appSlug}`);
       res.status(404).json({ message: 'App not found' });
       return;
     }
 
-    console.log(`[getManifest] Found app with ID: ${app.id}`);
-
-    // Build query for updates
-    const query: any = {
-      appId: app.id,
-      channel
-    };
-
-    // Remove exact runtime version match - we'll use semver comparison later
-    // if (runtimeVersion) {
-    //   query.runtimeVersion = runtimeVersion;
-    // }
-
-    // Find all updates for the app in the specified channel
-    const updates = await Update.findAll({
-      where: query,
+    const allUpdates = await Update.findAll({
+      where: { appId: app.id, channel: channel },
       order: [['createdAt', 'DESC']],
-      include: [
-        {
-          model: Manifest,
-          as: 'manifest'
-        }
-      ]
+      include: [{ model: Manifest, as: 'manifest', required: true }]
     });
 
-    if (!updates || updates.length === 0) {
-      console.log(`[getManifest] No updates found for app ID: ${app.id}, channel: ${channel}`);
-      res.status(404).json({ message: 'No updates available' });
+    if (!allUpdates || allUpdates.length === 0) {
+      res.status(404).json({ message: 'No updates available for this app and channel' });
       return;
     }
 
-    // If runtimeVersion is provided, filter updates to find those with higher versions
-    let compatibleUpdate = null;
-    if (runtimeVersion) {
-      // Simple semver comparison function
-      const isNewerVersion = (v1: string, v2: string): boolean => {
-        const v1Parts = v1.split('.').map(Number);
-        const v2Parts = v2.split('.').map(Number);
+    const compatibleUpdates = allUpdates.filter(update => {
+      const manifestPlatforms = update.manifest?.platforms || [];
+      if (manifestPlatforms.length > 0 && !manifestPlatforms.includes(platform)) {
+        console.log(`[getManifest] Update ID ${update.id} skipped: platform ${platform} not in manifest platforms [${manifestPlatforms.join(', ')}]`);
+        return false;
+      }
 
-        console.log(`[getManifest] Comparing versions: ${v1} vs ${v2}`);
-        console.log(`[getManifest] Parsed parts: ${v1Parts.join('.')} vs ${v2Parts.join('.')}`);
-
-        for (let i = 0; i < Math.max(v1Parts.length, v2Parts.length); i++) {
-          const v1Part = v1Parts[i] || 0;
-          const v2Part = v2Parts[i] || 0;
-          console.log(`[getManifest] Comparing component ${i}: ${v1Part} vs ${v2Part}`);
-          if (v1Part > v2Part) {
-            console.log(`[getManifest] ${v1} is newer than ${v2}`);
-            return true;
-          }
-          if (v1Part < v2Part) {
-            console.log(`[getManifest] ${v1} is older than ${v2}`);
-            return false;
-          }
-        }
-        console.log(`[getManifest] ${v1} is equal to ${v2}`);
-        return false; // Versions are equal
-      };
-
-      // Log all available updates
-      console.log(`[getManifest] Found ${updates.length} updates to check for compatibility`);
-      updates.forEach((update, index) => {
-        console.log(`[getManifest] Update ${index+1}: version=${update.version}, runtimeVersion=${update.runtimeVersion}`);
-      });
-
-      // Find the newest update with a version higher than current runtime version
-      for (const update of updates) {
-        // First check for exact match
-        if (update.runtimeVersion === runtimeVersion) {
-          console.log(`[getManifest] Found exact runtime version match: ${update.runtimeVersion}`);
-          compatibleUpdate = update;
-          break;
-        }
-
-        // Then check for newer version
-        if (isNewerVersion(update.version, runtimeVersion)) {
-          console.log(`[getManifest] Found newer version: ${update.version} > ${runtimeVersion}`);
-          compatibleUpdate = update;
-          break;
+      if (update.targetVersionRange) {
+        if (semver.satisfies(clientRuntimeVersion, update.targetVersionRange)) {
+          console.log(`[getManifest] Update ID ${update.id} (version ${update.version}, tvr: ${update.targetVersionRange}) satisfies clientRuntimeVersion ${clientRuntimeVersion}.`);
+          return true;
         } else {
-          console.log(`[getManifest] Update version ${update.version} is not newer than ${runtimeVersion}, skipping`);
+          console.log(`[getManifest] Update ID ${update.id} (version ${update.version}, tvr: ${update.targetVersionRange}) does NOT satisfy clientRuntimeVersion ${clientRuntimeVersion}.`);
+          return false;
+        }
+      } else {
+        if (update.runtimeVersion === clientRuntimeVersion) {
+          console.log(`[getManifest] Update ID ${update.id} (version ${update.version}, no tvr) matches clientRuntimeVersion ${clientRuntimeVersion} exactly.`);
+          return true;
+        } else {
+           console.log(`[getManifest] Update ID ${update.id} (version ${update.version}, no tvr, updateRuntime: ${update.runtimeVersion}) does NOT match clientRuntimeVersion ${clientRuntimeVersion} exactly.`);
+          return false;
         }
       }
-    } else {
-      // If no runtimeVersion provided, just use the latest update
-      compatibleUpdate = updates[0];
-    }
+    });
 
-    if (!compatibleUpdate) {
-      console.log(`[getManifest] No compatible updates found for app ID: ${app.id}, channel: ${channel}, runtimeVersion: ${runtimeVersion}`);
-      res.status(404).json({ message: 'No compatible updates available' });
+    if (compatibleUpdates.length === 0) {
+      console.log(`[getManifest] No updates found satisfying version constraints for clientRuntimeVersion ${clientRuntimeVersion}`);
+      res.status(404).json({ message: 'No compatible updates available for your app version' });
       return;
     }
 
-    console.log(`[getManifest] Found compatible update ID: ${compatibleUpdate.id}`);
+    const sortedCompatibleUpdates = compatibleUpdates.sort((a, b) => semver.rcompare(a.version, b.version));
+    const latestCompatibleUpdate = sortedCompatibleUpdates[0];
 
-    // Explicitly check for manifest association
-    const manifest = compatibleUpdate.get('manifest') as Manifest | undefined;
-    if (!manifest) {
-      console.log(`[getManifest] No manifest found for update ID: ${compatibleUpdate.id}`);
-      res.status(404).json({ message: 'Manifest not found' });
-      return;
-    }
+    console.log(`[getManifest] Selected latest compatible update ID: ${latestCompatibleUpdate.id}, version: ${latestCompatibleUpdate.version}`);
 
-    // Check if update supports the requested platform
-    const platforms = manifest.platforms || [];
-    if (platforms.length > 0 && !platforms.includes(platform)) {
-      console.log(`[getManifest] Update doesn't support platform: ${platform}`);
-      res.status(404).json({ message: `No update available for platform ${platform}` });
-      return;
-    }
-
-    // Parse manifest content and return it
     try {
-      let manifestContent = manifest.content;
+      let manifestContent = latestCompatibleUpdate.manifest!.content;
       if (typeof manifestContent === 'string') {
-        try {
-          manifestContent = JSON.parse(manifestContent);
-        } catch (parseError) {
-          console.error('[getManifest] Error parsing manifest content:', parseError);
-        }
+        manifestContent = JSON.parse(manifestContent);
       }
-
-      console.log(`[getManifest] Successfully returning manifest for update ID: ${compatibleUpdate.id}`);
       res.json(manifestContent);
     } catch (error) {
-      console.error('[getManifest] Error processing manifest content:', error);
+      console.error('[getManifest] Error parsing manifest content:', error);
       res.status(500).json({ message: 'Error processing manifest content' });
     }
+
   } catch (error) {
     console.error('[getManifest] Error fetching manifest:', error);
     res.status(500).json({ message: 'Server error while fetching manifest' });
@@ -855,46 +699,4 @@ export const getAssetFile = async (req: Request, res: Response): Promise<void> =
 
     // Set headers
     res.set('Content-Type', contentType);
-    res.set('Content-Disposition', `attachment; filename="${asset.name}"`);
-
-    // Send the file
-    res.sendFile(assetPath);
-  } catch (error) {
-    console.error('Error fetching asset file:', error);
-    res.status(500).json({ message: 'Server error while fetching asset file' });
-  }
-};
-
-// Helper function to determine content type from file name
-function getContentTypeFromFileName(fileName: string): string {
-  const extension = path.extname(fileName).toLowerCase();
-  switch (extension) {
-    case '.js':
-      return 'application/javascript';
-    case '.json':
-      return 'application/json';
-    case '.png':
-      return 'image/png';
-    case '.jpg':
-    case '.jpeg':
-      return 'image/jpeg';
-    case '.gif':
-      return 'image/gif';
-    case '.svg':
-      return 'image/svg+xml';
-    case '.ttf':
-      return 'font/ttf';
-    case '.otf':
-      return 'font/otf';
-    case '.woff':
-      return 'font/woff';
-    case '.woff2':
-      return 'font/woff2';
-    case '.css':
-      return 'text/css';
-    case '.html':
-      return 'text/html';
-    default:
-      return 'application/octet-stream';
-  }
-}
+    res.set('Content-Disposition', `
