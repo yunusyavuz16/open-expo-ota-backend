@@ -236,6 +236,7 @@ export class UpdateRepository {
       .single();
 
     if (error || !data) {
+      console.log('Error creating update: 239', error);
       throw new Error(`Error creating update: ${error?.message}`);
     }
 

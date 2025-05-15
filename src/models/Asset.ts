@@ -42,7 +42,7 @@ Asset.init({
   },
   updateId: {
     type: DataTypes.INTEGER,
-    allowNull: false,
+    allowNull: true,
     field: 'update_id',
   },
   name: {

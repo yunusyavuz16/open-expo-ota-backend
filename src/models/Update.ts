@@ -1,6 +1,6 @@
 import { Model, DataTypes, Optional } from 'sequelize';
 import sequelize from '../config/database';
-import { ReleaseChannel } from '../types';
+import { ReleaseChannel, Platform } from '../types';
 
 interface UpdateAttributes {
   id: number;
@@ -8,6 +8,7 @@ interface UpdateAttributes {
   version: string;
   channel: ReleaseChannel;
   runtimeVersion: string;
+  platforms: Platform[];
   isRollback: boolean;
   bundleId: number;
   manifestId: number;
@@ -25,6 +26,7 @@ class Update extends Model<UpdateAttributes, UpdateInput> implements UpdateAttri
   public version!: string;
   public channel!: ReleaseChannel;
   public runtimeVersion!: string;
+  public platforms!: Platform[];
   public isRollback!: boolean;
   public bundleId!: number;
   public manifestId!: number;
@@ -67,6 +69,11 @@ Update.init({
     type: DataTypes.STRING,
     allowNull: false,
     field: 'runtime_version',
+  },
+  platforms: {
+    type: DataTypes.ARRAY(DataTypes.ENUM(...Object.values(Platform))),
+    allowNull: false,
+    defaultValue: [Platform.IOS, Platform.ANDROID]
   },
   isRollback: {
     type: DataTypes.BOOLEAN,

@@ -23,7 +23,7 @@ const upload = multer({
   }
 });
 
-// Create a new update - updated to handle FormData correctly
+// Create a new update - updated to handle ZIP package
 router.post(
   '/:appId',
   authenticateJWT,
@@ -37,10 +37,7 @@ router.post(
     });
     next();
   },
-  upload.fields([
-    { name: 'bundle', maxCount: 1 },
-    { name: 'assets', maxCount: 20 } // Increased max count for assets
-  ]),
+  upload.any(),
   UpdateController.createUpdate
 );
 

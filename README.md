@@ -166,6 +166,55 @@ npm run lint
 npm test
 ```
 
+## ZIP-Based Update Process
+
+The backend now supports receiving updates as a single ZIP file package instead of multiple separate files. This approach simplifies the update publishing process and makes it more reliable.
+
+### Update Package Structure
+
+The expected ZIP file structure is:
+
+```
+update-package.zip
+├── bundle.js              # The main JavaScript bundle
+├── assets/                # Directory containing assets
+│   ├── image1.png
+│   ├── font1.ttf
+│   └── ...
+└── metadata.json          # Update metadata
+```
+
+The `metadata.json` file should contain:
+
+```json
+{
+  "version": "1.0.0",
+  "channel": "production",
+  "runtimeVersion": "1.0.0",
+  "platforms": ["ios", "android"]
+}
+```
+
+### Testing the ZIP Upload
+
+You can test the ZIP upload functionality using the provided test script:
+
+```bash
+# Set the required environment variables
+export AUTH_TOKEN="your-jwt-token"
+export APP_ID=1  # Your app ID
+export API_URL="http://localhost:3000/api"
+
+# Run the test script
+node src/scripts/test-zip-upload.js
+```
+
+The script will:
+1. Create a sample bundle with a test JS file and asset
+2. Package them into a ZIP file
+3. Upload to the specified backend endpoint
+4. Display the server response
+
 ## License
 
 MIT

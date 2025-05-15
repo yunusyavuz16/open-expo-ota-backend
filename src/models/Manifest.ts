@@ -10,6 +10,7 @@ interface ManifestAttributes {
   runtimeVersion: string;
   platforms: Platform[];
   content: Record<string, any>;
+  hash: string;
   createdAt?: Date;
   updatedAt?: Date;
 }
@@ -25,6 +26,7 @@ class Manifest extends Model<ManifestAttributes, ManifestInput> implements Manif
   public runtimeVersion!: string;
   public platforms!: Platform[];
   public content!: Record<string, any>;
+  public hash!: string;
 
   public readonly createdAt!: Date;
   public readonly updatedAt!: Date;
@@ -67,6 +69,10 @@ Manifest.init({
   },
   content: {
     type: DataTypes.JSONB,
+    allowNull: false,
+  },
+  hash: {
+    type: DataTypes.STRING,
     allowNull: false,
   },
 }, {
