@@ -49,9 +49,6 @@ const calculateHash = (buffer: Buffer): string => {
 };
 
 export const createUpdate = async (req: Request, res: Response): Promise<void> => {
-  let zipPath: string | undefined;
-  let extractDir: string | undefined;
-
   try {
     // Cast request to include file without strict typing
     const reqWithFile = req as any;
@@ -142,23 +139,17 @@ export const createUpdate = async (req: Request, res: Response): Promise<void> =
       res.status(400).json({ message: 'Update package file is required' });
       return;
     }
-    zipPath = updatePackageFile.path; // Assign zipPath here
 
     console.log('STEP 3: Found update package file');
+
+    const zipPath = updatePackageFile.path;
+    console.log('Using update package file:', updatePackageFile.fieldname, updatePackageFile.originalname);
     console.log('File details:', {
       size: updatePackageFile.size,
       encoding: updatePackageFile.encoding,
       mimetype: updatePackageFile.mimetype,
       path: updatePackageFile.path
     });
-
-    // Explicit check for zipPath to satisfy linter, though flow implies it's a string
-    if (!zipPath) {
-      // This case should ideally not be reached if updatePackageFile.path is always a string
-      console.error('Critical error: zipPath is undefined after assignment.');
-      res.status(500).json({ message: 'Internal server error: Update package path not found after assignment.'});
-      return;
-    }
 
     // Verify the zip file exists and has content
     try {
@@ -203,7 +194,7 @@ export const createUpdate = async (req: Request, res: Response): Promise<void> =
     // Extract the update package
     console.log('STEP 4: Extracting update package...');
     const extractedUpdate = await extractUpdatePackage(zipPath);
-    extractDir = path.dirname(extractedUpdate.bundlePath); // Assign extractDir here
+    const extractDir = path.dirname(extractedUpdate.bundlePath);
     console.log('STEP 5: Successfully extracted update package:', {
       bundleHash: extractedUpdate.bundleHash,
       assets: extractedUpdate.assets.length,
@@ -276,7 +267,37 @@ export const createUpdate = async (req: Request, res: Response): Promise<void> =
       const transaction = await sequelize.transaction();
 
       try {
-        console.log('STEP 14: Creating new update record');
+        // Prepare ManifestMetadata first
+        const bundleRecord = await Bundle.findByPk(bundleId, { transaction });
+        if (!bundleRecord) throw new Error('Bundle record not found after creation/lookup');
+
+        const manifestMetadata: Parameters<typeof generateManifest>[0] = {
+          version: updateVersion,
+          runtimeVersion: updateRuntimeVersion,
+          platforms: updatePlatforms as Platform[],
+          channel: updateChannel,
+          bundleUrl: `${req.protocol}://${req.get('host')}/api/bundle/${app.slug}/${bundleRecord.id}`, // Construct bundle URL
+          bundleHash: bundleRecord.hash, // Hash from the Bundle record
+          createdAt: new Date(),
+        };
+
+        console.log('STEP 14: Generating manifest content (without assets first)');
+        // Generate initial manifest content without assets (we'll update it later)
+        const initialManifestContent = generateManifest(manifestMetadata, []);
+        console.log('STEP 15: Initial manifest content generated');
+
+        const manifestRecord = await Manifest.create({
+          appId: appId,
+          version: updateVersion,
+          channel: updateChannel,
+          runtimeVersion: updateRuntimeVersion,
+          platforms: updatePlatforms as Platform[],
+          content: initialManifestContent,
+          hash: createHash('sha256').update(JSON.stringify(initialManifestContent)).digest('hex'),
+        }, { transaction });
+        console.log('STEP 16: Manifest record created with ID:', manifestRecord.id);
+
+        console.log('STEP 17: Creating new update record');
         const newUpdate = await Update.create({
           appId: appId,
           version: updateVersion,
@@ -285,66 +306,64 @@ export const createUpdate = async (req: Request, res: Response): Promise<void> =
           platforms: updatePlatforms, // Use the processed updatePlatforms from metadata or body
           targetVersionRange: targetVersionRange || null, // Store targetVersionRange
           bundleId: bundleId,
-          manifestId: 0, // Placeholder, will be updated after manifest creation
+          manifestId: manifestRecord.id, // Use the actual manifest ID
           publishedBy: user?.id || 0,
         }, { transaction });
-        console.log('STEP 15: New update record created successfully with ID:', newUpdate.id);
+        console.log('STEP 18: New update record created successfully with ID:', newUpdate.id);
 
         // Create Asset records from extractedUpdate.assets
-        console.log('STEP 16: Creating asset records');
+        console.log('STEP 19: Creating asset records');
         const createdDbAssets: Asset[] = [];
         for (const assetFile of extractedUpdate.assets) { // assetFile has { path, buffer, hash, name }
-          const safeAssetStorageName = path.basename(assetFile.name); // Sanitize asset name for storage path
-          const assetKey = generateStorageKey(appId, `assets/${newUpdate.id}`, safeAssetStorageName);
-          const storeResult = await storeFile(assetFile.buffer, assetKey); // Use .buffer
+          // Check if asset with same hash already exists
+          const existingAsset = await Asset.findOne({
+            where: { hash: assetFile.hash },
+            transaction
+          });
 
-          const dbAsset = await Asset.create({
-            updateId: newUpdate.id,
-            name: assetFile.name, // Store original name from zip (e.g., 'icons/home.png')
-            hash: assetFile.hash,
-            storageType: storeResult.storageType,
-            storagePath: storeResult.storagePath, // Based on safeAssetStorageName
-            size: assetFile.buffer.length, // Use .buffer.length for size
-          }, { transaction });
-          createdDbAssets.push(dbAsset);
-          console.log(`Successfully created asset in DB: ${dbAsset.id} - ${assetFile.name}`);
+          if (existingAsset) {
+            console.log(`Asset with hash ${assetFile.hash} already exists, reusing asset ID: ${existingAsset.id}`);
+            // Create a new asset record for this update but reference the existing storage
+            const dbAsset = await Asset.create({
+              updateId: newUpdate.id,
+              name: assetFile.name,
+              hash: assetFile.hash + '_' + newUpdate.id, // Make hash unique per update
+              storageType: existingAsset.storageType,
+              storagePath: existingAsset.storagePath,
+              size: assetFile.buffer.length,
+            }, { transaction });
+            createdDbAssets.push(dbAsset);
+            console.log(`Successfully created asset reference in DB: ${dbAsset.id} - ${assetFile.name}`);
+          } else {
+            // Store new asset file
+            const assetKey = generateStorageKey(appId, `assets/${newUpdate.id}`, assetFile.name);
+            const storeResult = await storeFile(assetFile.buffer, assetKey);
+
+            const dbAsset = await Asset.create({
+              updateId: newUpdate.id,
+              name: assetFile.name,
+              hash: assetFile.hash,
+              storageType: storeResult.storageType,
+              storagePath: storeResult.storagePath,
+              size: assetFile.buffer.length,
+            }, { transaction });
+            createdDbAssets.push(dbAsset);
+            console.log(`Successfully created new asset in DB: ${dbAsset.id} - ${assetFile.name}`);
+          }
         }
-        console.log('STEP 17: All asset records created in DB');
+        console.log('STEP 20: All asset records created in DB');
 
-        // Prepare ManifestMetadata
-        const bundleRecord = await Bundle.findByPk(bundleId, { transaction });
-        if (!bundleRecord) throw new Error('Bundle record not found after creation/lookup');
-
-        const manifestMetadata: Parameters<typeof generateManifest>[0] = {
-          version: newUpdate.version,
-          runtimeVersion: newUpdate.runtimeVersion,
-          platforms: newUpdate.platforms as Platform[],
-          channel: newUpdate.channel,
-          bundleUrl: `${req.protocol}://${req.get('host')}/api/bundles/${app.slug}/${bundleRecord.id}`, // Construct bundle URL
-          bundleHash: bundleRecord.hash, // Hash from the Bundle record
-          createdAt: newUpdate.createdAt || new Date(),
-        };
-
-        console.log('STEP 18: Generating manifest content');
-        const manifestContent = generateManifest(manifestMetadata, createdDbAssets);
-        console.log('STEP 19: Manifest content generated');
-
-        const manifestRecord = await Manifest.create({
-          appId: appId,
-          version: newUpdate.version,
-          channel: newUpdate.channel,
-          runtimeVersion: newUpdate.runtimeVersion,
-          platforms: newUpdate.platforms as Platform[],
-          content: manifestContent,
-          hash: createHash('sha256').update(JSON.stringify(manifestContent)).digest('hex'),
+        // Now update the manifest with the complete asset information
+        console.log('STEP 21: Updating manifest with asset information');
+        const updatedManifestContent = generateManifest(manifestMetadata, createdDbAssets);
+        await manifestRecord.update({
+          content: updatedManifestContent,
+          hash: createHash('sha256').update(JSON.stringify(updatedManifestContent)).digest('hex'),
         }, { transaction });
-        console.log('STEP 20: Manifest record created with ID:', manifestRecord.id);
-
-        await newUpdate.update({ manifestId: manifestRecord.id }, { transaction });
-        console.log('STEP 21: Update record updated with manifest ID');
+        console.log('STEP 22: Manifest updated with assets');
 
         await transaction.commit();
-        console.log('STEP 22: Transaction committed');
+        console.log('STEP 23: Transaction committed');
 
         const populatedUpdate = await Update.findByPk(newUpdate.id, {
           include: [
@@ -354,29 +373,49 @@ export const createUpdate = async (req: Request, res: Response): Promise<void> =
             { model: Asset, as: 'assets' },
             { model: User, as: 'publisher'}
           ],
-        });
+      });
 
         res.status(201).json({
           message: 'Update published successfully',
           update: populatedUpdate,
         });
-        console.log('STEP 23: Response sent!');
+        console.log('STEP 24: Response sent!');
 
       } catch (error) {
         await transaction.rollback();
         console.error('Error during update publishing transaction:', error);
-        res.status(500).json({ message: 'Failed to publish update', error: (error as Error).message });
+
+        // Check if it's a Sequelize validation error
+        if (error instanceof Error && error.name === 'SequelizeValidationError') {
+          console.error('Validation error details:', error.message);
+          res.status(400).json({
+            message: 'Validation error',
+            error: error.message,
+            details: (error as any).errors
+          });
+        } else {
+          res.status(500).json({ message: 'Failed to publish update', error: (error as Error).message });
+        }
+      } finally {
+        console.log('STEP 25: Cleaning up temp extracted files');
+        await cleanupExtractedFiles(extractDir);
+        try {
+          fs.unlinkSync(zipPath);
+          console.log('STEP 26: Uploaded ZIP file cleaned up');
+        } catch (err) {
+          console.warn('Warning: Failed to clean up uploaded ZIP file:', err);
+        }
       }
     } finally {
       // Clean up extracted files
-      console.log('STEP 25: Cleaning up temp files');
+      console.log('STEP 27: Cleaning up temp files');
       await cleanupExtractedFiles(extractDir);
-      console.log('STEP 26: Cleaning up zip file');
+      console.log('STEP 28: Cleaning up zip file');
       // Clean up zip file
       try {
-        console.log('STEP 27: Cleaning up zip file');
+        console.log('STEP 29: Cleaning up zip file');
         fs.unlinkSync(zipPath);
-        console.log('STEP 28: Zip file cleaned up');
+        console.log('STEP 30: Zip file cleaned up');
       } catch (err) {
         console.warn('Warning: Failed to clean up zip file:', err);
       }
@@ -393,26 +432,7 @@ export const createUpdate = async (req: Request, res: Response): Promise<void> =
       console.error('Error cause:', error.cause);
     }
 
-    res.status(500).json({ message: `Error creating update: ${error.message || 'Unknown error'}` });
-  } finally {
-    if (extractDir) {
-      try {
-        console.log('Cleaning up temporary extracted files from:', extractDir);
-        await cleanupExtractedFiles(extractDir);
-        console.log('Temporary extracted files cleaned up successfully.');
-      } catch (err) {
-        console.warn('Warning: Failed to clean up extracted files:', err);
-      }
-    }
-    if (zipPath) {
-      try {
-        console.log('Cleaning up uploaded ZIP file:', zipPath);
-        fs.unlinkSync(zipPath);
-        console.log('Uploaded ZIP file cleaned up successfully.');
-      } catch (err) {
-        console.warn('Warning: Failed to clean up uploaded ZIP file:', err);
-      }
-    }
+    res.json({ status: 'error', message: `Error creating update: ${error.message || 'Unknown error'}` });
   }
 };
 
@@ -568,7 +588,7 @@ export const getManifest = async (req: Request, res: Response): Promise<void> =>
         } else {
           console.log(`[getManifest] Update ID ${update.id} (version ${update.version}, tvr: ${update.targetVersionRange}) does NOT satisfy clientRuntimeVersion ${clientRuntimeVersion}.`);
           return false;
-        }
+    }
       } else {
         if (update.runtimeVersion === clientRuntimeVersion) {
           console.log(`[getManifest] Update ID ${update.id} (version ${update.version}, no tvr) matches clientRuntimeVersion ${clientRuntimeVersion} exactly.`);
@@ -594,7 +614,7 @@ export const getManifest = async (req: Request, res: Response): Promise<void> =>
     try {
       let manifestContent = latestCompatibleUpdate.manifest!.content;
       if (typeof manifestContent === 'string') {
-        manifestContent = JSON.parse(manifestContent);
+          manifestContent = JSON.parse(manifestContent);
       }
       res.json(manifestContent);
     } catch (error) {
@@ -719,7 +739,8 @@ export const getAssetFile = async (req: Request, res: Response): Promise<void> =
 
     // Set headers
     res.set('Content-Type', contentType);
-    res.set('Content-Disposition', `attachment; filename="${path.basename(asset.name)}"`);
+    res.set('Content-Disposition', `attachment; filename="${asset.name}"`);
+
     // Send the file
     res.sendFile(assetPath);
   } catch (error) {
