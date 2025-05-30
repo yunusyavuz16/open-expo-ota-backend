@@ -19,43 +19,69 @@ interface ManifestMetadata {
   createdAt: Date;
 }
 
+interface RequestContext {
+  protocol: string;
+  host: string;
+  appSlug: string;
+}
+
 export const generateManifest = (
   metadata: ManifestMetadata,
   assets: Asset[],
+  requestContext?: RequestContext
 ): Record<string, any> => {
-  // Format assets for manifest
-  const formattedAssets: Record<string, ManifestAsset> = {};
+  // Format assets for manifest - new format expects assets as array
+  const formattedAssets: ManifestAsset[] = assets.map((asset) => {
+    let assetUrl: string;
+    if (requestContext) {
+      // Generate URL using request context for dynamic manifest generation
+      assetUrl = `${requestContext.protocol}://${requestContext.host}/api/assets/${requestContext.appSlug}/${asset.id}`;
+    } else {
+      // Fallback to storage URL for static manifest generation
+      assetUrl = getFileUrl(asset.storagePath, asset.storageType);
+    }
 
-  assets.forEach((asset) => {
-    formattedAssets[asset.name] = {
+    return {
       hash: asset.hash,
-      key: asset.storagePath,
+      key: asset.name,
       contentType: 'application/octet-stream', // Default content type
-      url: getFileUrl(asset.storagePath, asset.storageType),
+      url: assetUrl,
     };
   });
 
-  // Construct manifest in format compatible with Expo Updates
-  return {
-    id: metadata.bundleHash, // Using bundle hash as the unique ID
+  // Generate a unique update ID (UUID format expected by expo-updates)
+  const updateId = metadata.bundleHash; // Use bundle hash as update ID
+
+  // Construct manifest in the new expo-updates format
+  const manifest = {
+    id: updateId,
     createdAt: metadata.createdAt.toISOString(),
     runtimeVersion: metadata.runtimeVersion,
-    version: metadata.version,
-    platforms: metadata.platforms,
-    channel: metadata.channel,
-    assets: formattedAssets,
     launchAsset: {
       hash: metadata.bundleHash,
-      key: metadata.bundleUrl.split('/').pop(),
+      key: 'bundle.js',
       contentType: 'application/javascript',
       url: metadata.bundleUrl,
     },
+    assets: formattedAssets,
     metadata: {
-      // Additional metadata can be added here
+      version: metadata.version,
       channel: metadata.channel,
-      type: 'expo',
+      platforms: metadata.platforms,
+    },
+    extra: {
+      // Additional metadata for compatibility
+      expoClient: {
+        name: 'OpenExpoOTA App',
+        slug: 'openexpoota-app',
+        version: metadata.version,
+        runtimeVersion: metadata.runtimeVersion,
+        platforms: metadata.platforms,
+      },
     },
   };
+
+  return manifest;
 };
 
 // Helper function to check if a runtime version is compatible

@@ -24,8 +24,8 @@ export const generateToken = (userId: number): string => {
   const secretKey = process.env.JWT_SECRET || 'default_jwt_secret';
   const expiresIn = process.env.JWT_EXPIRATION || '24h';
 
-  // Use type assertion to bypass TypeScript restrictions
-  return jwt.sign({ id: userId }, secretKey as any, { expiresIn });
+  // Bypass TypeScript type checking for jwt.sign
+  return jwt.sign({ id: userId }, secretKey, { expiresIn } as any);
 };
 
 /**
@@ -44,23 +44,38 @@ export const githubCallback = (req: Request, res: Response): void => {
     // Generate JWT token
     const token = generateToken(user.id);
 
-    // Check if there's a redirect URL in the state parameter
-    const state = req.query.state as string;
-    if (state) {
+    // Check for redirect URL - first try the redirect query parameter (from CLI)
+    let redirectUrl = req.query.redirect as string;
+
+    // If not found, check the state parameter (traditional OAuth flow)
+    if (!redirectUrl) {
+      const state = req.query.state as string;
+      if (state) {
+        try {
+          redirectUrl = Buffer.from(state, 'base64').toString();
+        } catch (e) {
+          console.error('Error decoding redirect URL from state:', e);
+        }
+      }
+    }
+
+    // If we have a valid redirect URL, redirect to it with the token
+    if (redirectUrl) {
       try {
-        const redirectUrl = Buffer.from(state, 'base64').toString();
         // Make sure the redirect URL includes a protocol to prevent open redirect vulnerabilities
         if (redirectUrl.startsWith('http://') || redirectUrl.startsWith('https://')) {
           // Add token as query parameter to the redirect URL
           const separator = redirectUrl.includes('?') ? '&' : '?';
+          console.log(`Redirecting to CLI callback: ${redirectUrl}${separator}token=${token}`);
           return res.redirect(`${redirectUrl}${separator}token=${token}`);
         }
       } catch (e) {
-        console.error('Error decoding redirect URL:', e);
+        console.error('Error processing redirect URL:', e);
       }
     }
 
     // If no valid redirect URL, fall back to the success page
+    console.log('No valid redirect URL found, showing success page');
     res.redirect(`/api/auth/success?token=${token}`);
   } catch (error) {
     console.error('Authentication callback error:', error);

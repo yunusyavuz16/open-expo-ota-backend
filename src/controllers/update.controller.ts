@@ -568,8 +568,9 @@ export const getManifest = async (req: Request, res: Response): Promise<void> =>
     const channel = req.query.channel as ReleaseChannel || ReleaseChannel.PRODUCTION;
     const platform = req.query.platform as Platform || Platform.IOS;
     const clientRuntimeVersion = req.query.runtimeVersion as string;
+    const clientAppVersion = req.query.appVersion as string; // New: app binary version for targetVersion comparison
 
-    console.log(`[getManifest] Request: appSlug=${appSlug}, channel=${channel}, platform=${platform}, clientRuntimeVersion=${clientRuntimeVersion}`);
+    console.log(`[getManifest] Request: appSlug=${appSlug}, channel=${channel}, platform=${platform}, clientRuntimeVersion=${clientRuntimeVersion}, clientAppVersion=${clientAppVersion}`);
 
     if (!clientRuntimeVersion) {
       res.status(400).json({ message: 'runtimeVersion query parameter is required' });
@@ -577,6 +578,12 @@ export const getManifest = async (req: Request, res: Response): Promise<void> =>
     }
     if (!semver.valid(clientRuntimeVersion)) {
         res.status(400).json({ message: 'Invalid clientRuntimeVersion format.' });
+        return;
+    }
+
+    // App version is optional but if provided, should be valid semver
+    if (clientAppVersion && !semver.valid(clientAppVersion)) {
+        res.status(400).json({ message: 'Invalid clientAppVersion format.' });
         return;
     }
 
@@ -598,33 +605,37 @@ export const getManifest = async (req: Request, res: Response): Promise<void> =>
     }
 
     const compatibleUpdates = allUpdates.filter(update => {
+      // Check platform compatibility
       const manifestPlatforms = update.manifest?.platforms || [];
       if (manifestPlatforms.length > 0 && !manifestPlatforms.includes(platform)) {
         console.log(`[getManifest] Update ID ${update.id} skipped: platform ${platform} not in manifest platforms [${manifestPlatforms.join(', ')}]`);
         return false;
       }
 
+      // Check targetVersion compatibility (app binary version)
       if (update.targetVersionRange) {
-        if (semver.satisfies(clientRuntimeVersion, update.targetVersionRange)) {
-          console.log(`[getManifest] Update ID ${update.id} (version ${update.version}, tvr: ${update.targetVersionRange}) satisfies clientRuntimeVersion ${clientRuntimeVersion}.`);
-          return true;
+        // Use app version for targetVersion comparison if available, otherwise fall back to runtime version
+        const versionToCheck = clientAppVersion || clientRuntimeVersion;
+        if (semver.satisfies(versionToCheck, update.targetVersionRange)) {
+          console.log(`[getManifest] Update ID ${update.id} (version ${update.version}, targetVersionRange: ${update.targetVersionRange}) satisfies client version ${versionToCheck}.`);
         } else {
-          console.log(`[getManifest] Update ID ${update.id} (version ${update.version}, tvr: ${update.targetVersionRange}) does NOT satisfy clientRuntimeVersion ${clientRuntimeVersion}.`);
-          return false;
-    }
-      } else {
-        if (update.runtimeVersion === clientRuntimeVersion) {
-          console.log(`[getManifest] Update ID ${update.id} (version ${update.version}, no tvr) matches clientRuntimeVersion ${clientRuntimeVersion} exactly.`);
-          return true;
-        } else {
-           console.log(`[getManifest] Update ID ${update.id} (version ${update.version}, no tvr, updateRuntime: ${update.runtimeVersion}) does NOT match clientRuntimeVersion ${clientRuntimeVersion} exactly.`);
+          console.log(`[getManifest] Update ID ${update.id} (version ${update.version}, targetVersionRange: ${update.targetVersionRange}) does NOT satisfy client version ${versionToCheck}.`);
           return false;
         }
+      }
+
+      // Check runtime version compatibility (separate from targetVersion)
+      if (update.runtimeVersion === clientRuntimeVersion) {
+        console.log(`[getManifest] Update ID ${update.id} (version ${update.version}) matches clientRuntimeVersion ${clientRuntimeVersion} exactly.`);
+        return true;
+      } else {
+         console.log(`[getManifest] Update ID ${update.id} (version ${update.version}, updateRuntime: ${update.runtimeVersion}) does NOT match clientRuntimeVersion ${clientRuntimeVersion} exactly.`);
+         return false;
       }
     });
 
     if (compatibleUpdates.length === 0) {
-      console.log(`[getManifest] No updates found satisfying version constraints for clientRuntimeVersion ${clientRuntimeVersion}`);
+      console.log(`[getManifest] No updates found satisfying version constraints for clientRuntimeVersion ${clientRuntimeVersion} and clientAppVersion ${clientAppVersion || 'not provided'}`);
       res.status(404).json({ message: 'No compatible updates available for your app version' });
       return;
     }
@@ -635,13 +646,7 @@ export const getManifest = async (req: Request, res: Response): Promise<void> =>
     console.log(`[getManifest] Selected latest compatible update ID: ${latestCompatibleUpdate.id}, version: ${latestCompatibleUpdate.version}`);
 
     try {
-      let manifestContent = latestCompatibleUpdate.manifest!.content;
-      if (typeof manifestContent === 'string') {
-          manifestContent = JSON.parse(manifestContent);
-      }
-
-      // CRITICAL FIX: Dynamically generate bundle and asset URLs instead of using stored ones
-      // Get the bundle associated with this update
+      // DYNAMIC MANIFEST GENERATION: Instead of using stored content, generate it dynamically
       const updateWithBundle = await Update.findByPk(latestCompatibleUpdate.id, {
         include: [
           { model: Bundle, as: 'bundle', required: true },
@@ -649,79 +654,49 @@ export const getManifest = async (req: Request, res: Response): Promise<void> =>
         ]
       });
 
-      console.log(`[getManifest] DEBUG: Update ID: ${latestCompatibleUpdate.id}, bundleId in update: ${latestCompatibleUpdate.bundleId}`);
-      console.log(`[getManifest] DEBUG: Bundle found:`, updateWithBundle?.bundle ? {
-        id: updateWithBundle.bundle.id,
-        hash: updateWithBundle.bundle.hash.substring(0, 16) + '...',
-        appId: updateWithBundle.bundle.appId
-      } : 'No bundle found');
-
-      // DEBUG: Check if the bundleId actually exists in Bundle table
-      const directBundleCheck = await Bundle.findByPk(latestCompatibleUpdate.bundleId);
-      console.log(`[getManifest] DEBUG: Direct bundle check for ID ${latestCompatibleUpdate.bundleId}:`, directBundleCheck ? 'Found' : 'Not found');
-
-      // DEBUG: Find all bundles for this app to see what's available
-      const allBundles = await Bundle.findAll({ where: { appId: app.id }, order: [['id', 'DESC']], limit: 5 });
-      console.log(`[getManifest] DEBUG: Available bundles for app ${app.id}:`, allBundles.map(b => ({ id: b.id, hash: b.hash.substring(0, 16) + '...' })));
-
       if (!updateWithBundle || !updateWithBundle.bundle) {
-        // Fallback: Try to use the latest bundle for this app if the association is broken
-        const latestBundle = allBundles[0];
-        if (latestBundle) {
-          console.log(`[getManifest] FALLBACK: Using latest bundle ID ${latestBundle.id} instead of missing bundle ${latestCompatibleUpdate.bundleId}`);
-
-          // Generate the correct bundle URL using the latest available bundle
-          const bundleUrl = `${req.protocol}://${req.get('host')}/api/bundle/${appSlug}/${latestBundle.id}`;
-
-          // Update the manifest with the correct bundle URL
-          manifestContent.launchAsset = {
-            hash: latestBundle.hash,
-            key: latestBundle.id.toString(),
-            contentType: 'application/javascript',
-            url: bundleUrl,
-          };
-
-          console.log(`[getManifest] FALLBACK Bundle URL generated: ${bundleUrl}, Bundle ID: ${latestBundle.id}`);
-          res.json(manifestContent);
-          return;
-        }
-
         res.status(500).json({ message: 'Bundle not found for update' });
         return;
       }
 
-      // Generate the correct bundle URL using the actual bundle ID
+      console.log(`[getManifest] Dynamically generating manifest for update ID: ${latestCompatibleUpdate.id}`);
+
+      // Generate the correct bundle URL
       const bundleUrl = `${req.protocol}://${req.get('host')}/api/bundle/${appSlug}/${updateWithBundle.bundle.id}`;
 
-      // Update the manifest with the correct bundle URL
-      manifestContent.launchAsset = {
-        hash: updateWithBundle.bundle.hash,
-        key: updateWithBundle.bundle.id.toString(),
-        contentType: 'application/javascript',
-        url: bundleUrl,
+      // Prepare manifest metadata
+      const manifestMetadata = {
+        version: latestCompatibleUpdate.version,
+        runtimeVersion: latestCompatibleUpdate.runtimeVersion,
+        platforms: latestCompatibleUpdate.platforms as Platform[],
+        channel: latestCompatibleUpdate.channel,
+        bundleUrl: bundleUrl,
+        bundleHash: updateWithBundle.bundle.hash,
+        createdAt: latestCompatibleUpdate.createdAt,
       };
 
-      // Also update asset URLs if there are any
-      if (updateWithBundle.assets && updateWithBundle.assets.length > 0) {
-        const updatedAssets: Record<string, any> = {};
-        updateWithBundle.assets.forEach((asset: Asset) => {
-          const assetUrl = `${req.protocol}://${req.get('host')}/api/assets/${appSlug}/${asset.id}`;
-          updatedAssets[asset.name] = {
-            hash: asset.hash,
-            key: asset.storagePath,
-            contentType: 'application/octet-stream',
-            url: assetUrl,
-          };
-        });
-        manifestContent.assets = updatedAssets;
+      // Get assets - pass Asset instances directly to generateManifest
+      const assets = updateWithBundle.assets || [];
+
+      // Generate manifest using the updated function with request context
+      const requestContext = {
+        protocol: req.protocol,
+        host: req.get('host') || 'localhost:3000',
+        appSlug: appSlug
+      };
+      const dynamicManifest = generateManifest(manifestMetadata, assets, requestContext);
+
+      // Add targetVersion to manifest for client-side verification
+      if (latestCompatibleUpdate.targetVersionRange) {
+        dynamicManifest.targetVersion = latestCompatibleUpdate.targetVersionRange;
       }
 
-      console.log(`[getManifest] Bundle URL generated: ${bundleUrl}, Bundle ID: ${updateWithBundle.bundle.id}`);
+      console.log(`[getManifest] Dynamic manifest generated successfully with new format`);
+      res.json(dynamicManifest);
 
-      res.json(manifestContent);
     } catch (error) {
-      console.error('[getManifest] Error parsing manifest content:', error);
-      res.status(500).json({ message: 'Error processing manifest content' });
+      console.error('[getManifest] Error generating dynamic manifest:', error);
+      res.status(500).json({ message: 'Error generating manifest content' });
     }
 
   } catch (error) {
