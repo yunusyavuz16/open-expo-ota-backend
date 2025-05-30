@@ -298,6 +298,21 @@ export const createUpdate = async (req: Request, res: Response): Promise<void> =
         console.log('STEP 16: Manifest record created with ID:', manifestRecord.id);
 
         console.log('STEP 17: Creating new update record');
+
+        // Check for existing update with same app, version, and channel
+        const existingUpdate = await Update.findOne({
+          where: {
+            appId: appId,
+            version: updateVersion,
+            channel: updateChannel,
+          },
+          transaction
+        });
+
+        if (existingUpdate) {
+          throw new Error(`An update with version "${updateVersion}" already exists for channel "${updateChannel}". Please use a different version number or delete the existing update first.`);
+        }
+
         const newUpdate = await Update.create({
           appId: appId,
           version: updateVersion,
@@ -393,29 +408,37 @@ export const createUpdate = async (req: Request, res: Response): Promise<void> =
             error: error.message,
             details: (error as any).errors
           });
+        } else if (error instanceof Error && error.name === 'SequelizeUniqueConstraintError') {
+          console.error('Unique constraint error details:', error.message);
+          res.status(409).json({
+            message: 'Duplicate update detected',
+            error: 'An update with this version and channel combination already exists for this app',
+            suggestion: 'Please use a different version number or delete the existing update first'
+          });
+        } else if (error instanceof Error && error.message.includes('already exists for channel')) {
+          // Our custom duplicate check error
+          console.error('Duplicate update error:', error.message);
+          res.status(409).json({
+            message: 'Duplicate update detected',
+            error: error.message,
+            suggestion: 'Please increment your version number (e.g., from 1.3.0 to 1.3.1) or use a different channel'
+          });
         } else {
           res.status(500).json({ message: 'Failed to publish update', error: (error as Error).message });
         }
       } finally {
         console.log('STEP 25: Cleaning up temp extracted files');
         await cleanupExtractedFiles(extractDir);
-        try {
-          fs.unlinkSync(zipPath);
-          console.log('STEP 26: Uploaded ZIP file cleaned up');
-        } catch (err) {
-          console.warn('Warning: Failed to clean up uploaded ZIP file:', err);
-        }
       }
     } finally {
-      // Clean up extracted files
-      console.log('STEP 27: Cleaning up temp files');
+      // Clean up extracted files and zip file (main cleanup)
+      console.log('STEP 26: Cleaning up temp files');
       await cleanupExtractedFiles(extractDir);
-      console.log('STEP 28: Cleaning up zip file');
+      console.log('STEP 27: Cleaning up zip file');
       // Clean up zip file
       try {
-        console.log('STEP 29: Cleaning up zip file');
         fs.unlinkSync(zipPath);
-        console.log('STEP 30: Zip file cleaned up');
+        console.log('STEP 28: Zip file cleaned up');
       } catch (err) {
         console.warn('Warning: Failed to clean up zip file:', err);
       }
@@ -616,6 +639,85 @@ export const getManifest = async (req: Request, res: Response): Promise<void> =>
       if (typeof manifestContent === 'string') {
           manifestContent = JSON.parse(manifestContent);
       }
+
+      // CRITICAL FIX: Dynamically generate bundle and asset URLs instead of using stored ones
+      // Get the bundle associated with this update
+      const updateWithBundle = await Update.findByPk(latestCompatibleUpdate.id, {
+        include: [
+          { model: Bundle, as: 'bundle', required: true },
+          { model: Asset, as: 'assets' }
+        ]
+      });
+
+      console.log(`[getManifest] DEBUG: Update ID: ${latestCompatibleUpdate.id}, bundleId in update: ${latestCompatibleUpdate.bundleId}`);
+      console.log(`[getManifest] DEBUG: Bundle found:`, updateWithBundle?.bundle ? {
+        id: updateWithBundle.bundle.id,
+        hash: updateWithBundle.bundle.hash.substring(0, 16) + '...',
+        appId: updateWithBundle.bundle.appId
+      } : 'No bundle found');
+
+      // DEBUG: Check if the bundleId actually exists in Bundle table
+      const directBundleCheck = await Bundle.findByPk(latestCompatibleUpdate.bundleId);
+      console.log(`[getManifest] DEBUG: Direct bundle check for ID ${latestCompatibleUpdate.bundleId}:`, directBundleCheck ? 'Found' : 'Not found');
+
+      // DEBUG: Find all bundles for this app to see what's available
+      const allBundles = await Bundle.findAll({ where: { appId: app.id }, order: [['id', 'DESC']], limit: 5 });
+      console.log(`[getManifest] DEBUG: Available bundles for app ${app.id}:`, allBundles.map(b => ({ id: b.id, hash: b.hash.substring(0, 16) + '...' })));
+
+      if (!updateWithBundle || !updateWithBundle.bundle) {
+        // Fallback: Try to use the latest bundle for this app if the association is broken
+        const latestBundle = allBundles[0];
+        if (latestBundle) {
+          console.log(`[getManifest] FALLBACK: Using latest bundle ID ${latestBundle.id} instead of missing bundle ${latestCompatibleUpdate.bundleId}`);
+
+          // Generate the correct bundle URL using the latest available bundle
+          const bundleUrl = `${req.protocol}://${req.get('host')}/api/bundle/${appSlug}/${latestBundle.id}`;
+
+          // Update the manifest with the correct bundle URL
+          manifestContent.launchAsset = {
+            hash: latestBundle.hash,
+            key: latestBundle.id.toString(),
+            contentType: 'application/javascript',
+            url: bundleUrl,
+          };
+
+          console.log(`[getManifest] FALLBACK Bundle URL generated: ${bundleUrl}, Bundle ID: ${latestBundle.id}`);
+          res.json(manifestContent);
+          return;
+        }
+
+        res.status(500).json({ message: 'Bundle not found for update' });
+        return;
+      }
+
+      // Generate the correct bundle URL using the actual bundle ID
+      const bundleUrl = `${req.protocol}://${req.get('host')}/api/bundle/${appSlug}/${updateWithBundle.bundle.id}`;
+
+      // Update the manifest with the correct bundle URL
+      manifestContent.launchAsset = {
+        hash: updateWithBundle.bundle.hash,
+        key: updateWithBundle.bundle.id.toString(),
+        contentType: 'application/javascript',
+        url: bundleUrl,
+      };
+
+      // Also update asset URLs if there are any
+      if (updateWithBundle.assets && updateWithBundle.assets.length > 0) {
+        const updatedAssets: Record<string, any> = {};
+        updateWithBundle.assets.forEach((asset: Asset) => {
+          const assetUrl = `${req.protocol}://${req.get('host')}/api/assets/${appSlug}/${asset.id}`;
+          updatedAssets[asset.name] = {
+            hash: asset.hash,
+            key: asset.storagePath,
+            contentType: 'application/octet-stream',
+            url: assetUrl,
+          };
+        });
+        manifestContent.assets = updatedAssets;
+      }
+
+      console.log(`[getManifest] Bundle URL generated: ${bundleUrl}, Bundle ID: ${updateWithBundle.bundle.id}`);
+
       res.json(manifestContent);
     } catch (error) {
       console.error('[getManifest] Error parsing manifest content:', error);
@@ -642,34 +744,47 @@ export const getBundleFile = async (req: Request, res: Response): Promise<void> 
   try {
     const { appSlug, bundleId } = req.params;
 
-    // Find the app by slug
-    const app = await db.models.App.findOne({
+    console.log(`[getBundleFile] Requesting bundle: appSlug=${appSlug}, bundleId=${bundleId}`);
+
+    // Find the app by slug - use direct import instead of db.models
+    const app = await App.findOne({
       where: { slug: appSlug }
     });
 
     if (!app) {
+      console.log(`[getBundleFile] App not found for slug: ${appSlug}`);
       res.status(404).json({ message: 'App not found' });
       return;
     }
 
-    // Find the bundle
-    const bundle = await db.models.Bundle.findOne({
+    console.log(`[getBundleFile] App found: ID=${app.id}, slug=${app.slug}`);
+
+    // Find the bundle - use direct import instead of db.models
+    const bundle = await Bundle.findOne({
       where: { id: bundleId, appId: app.id }
     });
 
     if (!bundle) {
+      console.log(`[getBundleFile] Bundle not found: bundleId=${bundleId}, appId=${app.id}`);
       res.status(404).json({ message: 'Bundle not found' });
       return;
     }
 
-    // Get the bundle file path
-    const bundlePath = path.join(__dirname, '../../', bundle.storagePath);
+    console.log(`[getBundleFile] Bundle found: ID=${bundle.id}, path=${bundle.storagePath}`);
+
+    // Get the bundle file path - fix path construction for TypeScript source execution
+    const bundlePath = path.join(process.cwd(), 'uploads', bundle.storagePath);
+
+    console.log(`[getBundleFile] Full file path: ${bundlePath}`);
 
     // Check if file exists
     if (!fs.existsSync(bundlePath)) {
+      console.log(`[getBundleFile] Bundle file not found on disk: ${bundlePath}`);
       res.status(404).json({ message: 'Bundle file not found' });
       return;
     }
+
+    console.log(`[getBundleFile] File exists, serving bundle: ${bundlePath}`);
 
     // Set appropriate headers
     res.set('Content-Type', 'application/javascript');
@@ -688,7 +803,7 @@ export const getAssetFile = async (req: Request, res: Response): Promise<void> =
     const { appSlug, assetId } = req.params;
 
     // Find the app by slug
-    const app = await db.models.App.findOne({
+    const app = await App.findOne({
       where: { slug: appSlug }
     });
 
@@ -698,11 +813,11 @@ export const getAssetFile = async (req: Request, res: Response): Promise<void> =
     }
 
     // Find the asset
-    const asset = await db.models.Asset.findOne({
+    const asset = await Asset.findOne({
       where: { id: assetId },
       include: [
         {
-          model: db.models.Update,
+          model: Update,
           as: 'update',
           where: { appId: app.id }
         }
@@ -715,7 +830,7 @@ export const getAssetFile = async (req: Request, res: Response): Promise<void> =
     }
 
     // Get the asset file path
-    const assetPath = path.join(__dirname, '../../', asset.storagePath);
+    const assetPath = path.join(process.cwd(), 'uploads', asset.storagePath);
 
     // Check if file exists
     if (!fs.existsSync(assetPath)) {
